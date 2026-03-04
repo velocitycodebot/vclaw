@@ -12,12 +12,15 @@ import app.storage.database as db
 from app.schemas.models import (
     ChatRequest, CreateTask, UpdateTask, CreateToolRequest, ToolExecRequest,
     ToolDef, ToolResult, ShellExecRequest, CreateWorkflow, Workflow,
-    ExecLogEntry, Preferences, SpawnAgentRequest, AgentConfig,
+    ExecLogEntry, MemorySearchRequest, Preferences, SelfEditRunRequest, SpawnAgentRequest, AgentConfig,
     AgentMessageRequest, AgentMsgType, AgentStatus, SystemStatus, new_id,
 )
 from app.services.tools import ToolRegistry
 from app.services.workflows import WorkflowEngine, execute_workflow, run_scheduler
 from app.services.agents import AgentRegistry, execute_agent_step, run_agent_loop
+from app.services.orchestrator import run_orchestrator_loop
+from app.services.self_edit import self_edit_service
+from app.services.vector_memory import vector_memory
 import app.services.shell as shell_mod
 
 # ── Global state ──
@@ -32,6 +35,10 @@ async def lifespan(app: FastAPI):
     # Startup
     await db.initialize()
     print("✓ Database initialized")
+    await vector_memory.initialize()
+    await self_edit_service.initialize()
+    print("✓ Vector memory initialized")
+    print("✓ Self-edit pipeline initialized")
 
     tool_registry.register_builtins()
     for tool in await db.get_all_tools():
@@ -48,9 +55,13 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(
         run_scheduler(lambda: workflow_engine, lambda: tool_registry, None)
     )
+    asyncio.create_task(
+        run_orchestrator_loop(lambda: agent_registry, lambda: tool_registry, lambda: workflow_engine)
+    )
     host = os.environ.get("VCLAW_HOST", "0.0.0.0")
     port = os.environ.get("VCLAW_PORT", "3000")
     print("✓ Workflow scheduler started")
+    print("✓ Agent supervisor started")
     print(f"⚡ AgentOS ready on http://{host}:{port}")
 
     yield
@@ -85,6 +96,7 @@ async def chat_handler(req: ChatRequest):
     all_spawned = list(step.agents_spawned)
     all_tools_created = list(step.tools_created)
     all_workflows_created = list(step.workflows_created)
+    all_tasks_changed = list(step.tasks_changed)
     all_memory_updates = list(step.memory_facts_added)
     latest_preferences = step.preferences_updated
 
@@ -99,6 +111,7 @@ async def chat_handler(req: ChatRequest):
             all_spawned.extend(next_step.agents_spawned)
             all_tools_created.extend(next_step.tools_created)
             all_workflows_created.extend(next_step.workflows_created)
+            all_tasks_changed.extend(next_step.tasks_changed)
             all_memory_updates.extend(next_step.memory_facts_added)
             if next_step.preferences_updated:
                 latest_preferences = next_step.preferences_updated
@@ -134,6 +147,7 @@ async def chat_handler(req: ChatRequest):
         "agents_spawned": agents_info,
         "tools_created": [tool.model_dump() for tool in all_tools_created],
         "workflows_created": [workflow.model_dump() for workflow in all_workflows_created],
+        "tasks_changed": [task.model_dump(mode="json") for task in all_tasks_changed],
         "memory_updates": {
             "facts_added": all_memory_updates,
             "preferences": latest_preferences,
@@ -150,6 +164,17 @@ async def get_memory():
     facts = await db.get_all_facts()
     episodes = await db.get_episodes(50)
     return {"facts": [f.model_dump() for f in facts], "episodes": [e.model_dump() for e in episodes]}
+
+
+@app.post("/api/memory/search")
+async def search_memory(req: MemorySearchRequest):
+    hits = await vector_memory.search(req.query, limit=req.limit, source_types=req.source_types)
+    return {"hits": [hit.model_dump(mode="json") for hit in hits]}
+
+
+@app.get("/api/memory/vector-status")
+async def vector_memory_status():
+    return (await vector_memory.status()).model_dump(mode="json")
 
 
 @app.post("/api/memory/facts")
@@ -282,6 +307,36 @@ async def get_shell_history():
 
 
 # ═══════════════════════════════════════════
+# SELF-EDIT
+# ═══════════════════════════════════════════
+
+@app.post("/api/self-edit/run")
+async def run_self_edit(req: SelfEditRunRequest):
+    session = await self_edit_service.run(req)
+    return session.model_dump(mode="json")
+
+
+@app.get("/api/self-edit/sessions")
+async def list_self_edit_sessions():
+    sessions = await self_edit_service.list_sessions(50)
+    return {"sessions": [session.model_dump(mode="json") for session in sessions]}
+
+
+@app.get("/api/self-edit/sessions/{session_id}")
+async def get_self_edit_session(session_id: str):
+    session = await self_edit_service.get(session_id)
+    if session is None:
+        raise HTTPException(404, "Self-edit session not found")
+    return session.model_dump(mode="json")
+
+
+@app.post("/api/self-edit/sessions/{session_id}/rollback")
+async def rollback_self_edit_session(session_id: str):
+    session = await self_edit_service.rollback(session_id)
+    return session.model_dump(mode="json")
+
+
+# ═══════════════════════════════════════════
 # WORKFLOWS
 # ═══════════════════════════════════════════
 
@@ -331,6 +386,9 @@ async def run_workflow_route(wid: str):
 @app.post("/api/workflows/{wid}/toggle")
 async def toggle_workflow_route(wid: str):
     enabled = workflow_engine.toggle(wid)
+    if enabled is None:
+        raise HTTPException(404, "Workflow not found")
+    await db.set_workflow_enabled(wid, enabled)
     return {"enabled": enabled}
 
 
@@ -419,7 +477,7 @@ async def message_agent_route(aid: str, req: AgentMessageRequest):
     agent = agent_registry.get_agent(aid)
     if agent and agent.status == AgentStatus.IDLE:
         asyncio.create_task(
-            execute_agent_step(agent_registry, tool_registry, workflow_engine, aid, req.content)
+            run_agent_loop(agent_registry, tool_registry, workflow_engine, aid, req.content)
         )
 
     return {"message_id": mid, "sent": True}
@@ -458,7 +516,10 @@ async def system_status():
         total_facts=await db.count_table("facts"),
         total_episodes=await db.count_table("episodes"),
         total_tasks=len(all_tasks),
-        active_tasks=sum(1 for t in all_tasks if t.status != "done"),
+        active_tasks=sum(
+            1 for t in all_tasks
+            if t.status.lower() not in {"done", "completed", "cancelled", "canceled"}
+        ),
         total_logs=await db.count_table("exec_log"),
         total_shell_commands=await db.count_table("shell_history"),
         total_agents=agent_registry.total_count(),

@@ -86,13 +86,28 @@ The `shell` tool gives the AI direct OS command execution with safety filters bl
 AI creates persistent tools stored in a local JSON file. Handler formats: `shell:`, `script:`, `python:`, `http:`.
 
 ### Workflow Automation
-Chain tools into scheduled pipelines. Background scheduler checks every 30s for due workflows.
+Chain tools into scheduled pipelines. Background scheduler checks every 30s for due workflows and now supports `interval`, `daily`, and `weekly` schedules with optional timezone-aware execution.
 
 ### Persistent Memory
 Facts, episodes, preferences, tasks, tools, workflows, conversations all stored in `data/agent_os.json`.
 
+### Task Orchestration
+Tasks now carry progress, blockers, assignee, parent/dependency links, due dates, review cadence, and outcome fields so the assistant can keep work state over time and revisit it automatically.
+
+### Context Management
+The backend ranks relevant tasks, facts, workflows, and episodes per request and compresses older conversation history before sending context to Claude, reducing topic overload.
+
+### Semantic Recall
+The backend now maintains a vector-style memory index over preferences, facts, tasks, workflows, episodes, and conversation history, then uses semantic retrieval to surface relevant past context before each Claude call.
+
+### Controlled Self-Editing
+Source edits can now run through a guarded pipeline that snapshots touched files, applies writes, runs optional eval/test commands, records a session, and rolls changes back automatically on failure.
+
 ### Agentic Loop
 Single user message can trigger multiple tool executions across multiple iterations (up to 7 continuation rounds).
+
+### Active Supervision
+The main orchestrator now has a background supervisor that resumes waiting parent agents when children finish and triggers scheduled task reviews for stale or recurring tasks.
 
 ### Claude Integration
 - Native Claude Messages API tool use for built-in tools, custom tools, workflows, memory updates, and agent coordination
@@ -115,9 +130,15 @@ Single user message can trigger multiple tool executions across multiple iterati
 | POST | /api/workflows/:id/toggle | Enable/disable schedule |
 | GET/POST/DELETE | /api/memory/facts | Facts CRUD |
 | GET | /api/memory/episodes | Episode history |
+| POST | /api/memory/search | Semantic memory search |
+| GET | /api/memory/vector-status | Vector index status |
 | GET/PUT | /api/preferences | User preferences |
 | GET/POST/PUT/DELETE | /api/tasks | Task CRUD |
 | GET/DELETE | /api/logs | Execution log |
+| POST | /api/self-edit/run | Run guarded self-edit session |
+| GET | /api/self-edit/sessions | List self-edit sessions |
+| GET | /api/self-edit/sessions/:id | Self-edit session detail |
+| POST | /api/self-edit/sessions/:id/rollback | Roll back a session |
 | GET | /api/agents | List all agents |
 | GET | /api/agents/tree | Agent hierarchy tree |
 | POST | /api/agents/spawn | Spawn new agent |

@@ -88,7 +88,6 @@ function ChatPanel() {
       if (data) {
         setConvId(data.conversation_id);
         const newMsgs = [];
-        if (data.tool_calls?.length) data.tool_calls.forEach(tc => newMsgs.push({ role: 'system', content: `🔧 ${tc.tool} → ${tc.result?.success ? '✓' : '✗'}`, time: new Date() }));
         if (data.agents_spawned?.length) data.agents_spawned.forEach(a => newMsgs.push({ role: 'spawn', content: `🤖 Spawned: ${a.name} — ${a.role}`, time: new Date() }));
         newMsgs.push({ role: 'assistant', content: data.message || 'No response', time: new Date() });
         setMessages(prev => [...prev, ...newMsgs]);
@@ -486,6 +485,8 @@ function SettingsPanel() {
 
   const save = async (p) => { setPrefs(p); await api('/api/preferences', { method: 'PUT', body: JSON.stringify(p) }); };
   const reset = async () => { if (confirm('Reset ALL data?')) { await api('/api/reset', { method: 'POST' }); location.reload(); } };
+  const custom = prefs.custom || {};
+  const saveCustom = (key, value) => save({ ...prefs, custom: { ...custom, [key]: value } });
 
   const tones = ['friendly', 'professional', 'casual', 'concise'];
 
@@ -499,6 +500,19 @@ function SettingsPanel() {
           <div style={{ display: 'flex', gap: 6 }}>{tones.map(t => <button key={t} onClick={() => save({ ...prefs, tone: t })} style={{ ...S.btn, ...(prefs.tone === t ? S.primary : S.ghost), padding: '4px 10px', fontSize: 11, textTransform: 'capitalize' }}>{t}</button>)}</div></div>
         <div><label style={{ fontSize: 11, color: 'var(--fg2)', fontWeight: 500, display: 'block', marginBottom: 6 }}>Interests</label>
           <input value={(prefs.topics || []).join(', ')} onChange={e => save({ ...prefs, topics: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })} placeholder="AI, programming, music…" style={{ ...S.input, padding: '9px 12px', fontSize: 13 }} /></div>
+        <div style={{ borderTop: '1px solid var(--brd)', paddingTop: 16 }}>
+          <div style={{ fontSize: 12, color: 'var(--fg0)', fontWeight: 600, marginBottom: 10 }}>Assistant Persona</div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--fg1)', marginBottom: 12 }}>
+            <input type="checkbox" checked={!!custom.virtual_employee} onChange={e => saveCustom('virtual_employee', e.target.checked)} />
+            Virtual employee mode
+          </label>
+          <div><label style={{ fontSize: 11, color: 'var(--fg2)', fontWeight: 500, display: 'block', marginBottom: 6 }}>Assistant Name</label>
+            <input value={custom.assistant_name || ''} onChange={e => saveCustom('assistant_name', e.target.value)} placeholder="John Walker" style={{ ...S.input, padding: '9px 12px', fontSize: 13 }} /></div>
+          <div style={{ marginTop: 12 }}><label style={{ fontSize: 11, color: 'var(--fg2)', fontWeight: 500, display: 'block', marginBottom: 6 }}>Assistant Role</label>
+            <input value={custom.assistant_role || ''} onChange={e => saveCustom('assistant_role', e.target.value)} placeholder="Business Development Manager" style={{ ...S.input, padding: '9px 12px', fontSize: 13 }} /></div>
+          <div style={{ marginTop: 12 }}><label style={{ fontSize: 11, color: 'var(--fg2)', fontWeight: 500, display: 'block', marginBottom: 6 }}>Assistant Company</label>
+            <input value={custom.assistant_company || ''} onChange={e => saveCustom('assistant_company', e.target.value)} placeholder="Velocity Data Solutions" style={{ ...S.input, padding: '9px 12px', fontSize: 13 }} /></div>
+        </div>
         {stats && <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginTop: 8 }}>
           {[['Tools', stats.total_tools, 'var(--accent)'], ['Custom', stats.custom_tools, 'var(--green)'], ['Workflows', stats.total_workflows, 'var(--blue)'], ['Agents', stats.total_agents, 'var(--cyan)'], ['Active', stats.active_agents, 'var(--amber)'], ['Facts', stats.total_facts, 'var(--accent2)'], ['Commands', stats.total_shell_commands, 'var(--green)'], ['Logs', stats.total_logs, 'var(--fg2)']].map(([l, v, c]) => (
             <div key={l} style={{ background: 'var(--bg2)', border: '1px solid var(--brd)', borderRadius: 6, padding: '8px 10px' }}>

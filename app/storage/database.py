@@ -3,7 +3,7 @@ import json
 import os
 import sqlite3
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -22,6 +22,15 @@ _VALID_TABLES = frozenset({
     "exec_log", "shell_history", "conversations",
 })
 _STORAGE_LOCK = asyncio.Lock()
+
+
+def _mark_vector_memory_dirty() -> None:
+    try:
+        from app.services.vector_memory import vector_memory
+
+        vector_memory.mark_dirty()
+    except Exception:
+        pass
 
 
 def _default_state() -> dict[str, Any]:
@@ -143,6 +152,16 @@ def _sort_models(items: list[Any], attr: str, reverse: bool = False) -> list[Any
     return sorted(items, key=lambda item: getattr(item, attr), reverse=reverse)
 
 
+def _is_active_task_status(status: str) -> bool:
+    return status.lower() not in {"done", "completed", "cancelled", "canceled", "failed"}
+
+
+def _normalize_progress(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    return max(0, min(100, value))
+
+
 async def initialize():
     async with _STORAGE_LOCK:
         await asyncio.to_thread(_read_state_sync)
@@ -160,6 +179,7 @@ async def update_preferences(prefs: Preferences):
         state = await asyncio.to_thread(_read_state_sync)
         state["preferences"] = prefs.model_dump(mode="json")
         await asyncio.to_thread(_write_state_sync, state)
+    _mark_vector_memory_dirty()
 
 
 # ── Facts ──
@@ -176,6 +196,7 @@ async def add_fact(text: str, category: Optional[str] = None) -> Fact:
         state = await asyncio.to_thread(_read_state_sync)
         state["facts"].append(fact.model_dump(mode="json"))
         await asyncio.to_thread(_write_state_sync, state)
+    _mark_vector_memory_dirty()
     return fact
 
 
@@ -187,6 +208,7 @@ async def delete_fact(fid: str) -> bool:
         changed = len(state["facts"]) != original_len
         if changed:
             await asyncio.to_thread(_write_state_sync, state)
+            _mark_vector_memory_dirty()
         return changed
 
 
@@ -204,6 +226,7 @@ async def add_episode(summary: str) -> Episode:
         state = await asyncio.to_thread(_read_state_sync)
         state["episodes"].append(episode.model_dump(mode="json"))
         await asyncio.to_thread(_write_state_sync, state)
+    _mark_vector_memory_dirty()
     return episode
 
 
@@ -215,30 +238,74 @@ async def get_all_tasks() -> list[Task]:
     return _sort_models(tasks, "created_at", reverse=True)
 
 
+async def get_task(tid: str) -> Optional[Task]:
+    async with _STORAGE_LOCK:
+        state = await asyncio.to_thread(_read_state_sync)
+    for item in state["tasks"]:
+        if item["id"] == tid:
+            return Task(**item)
+    return None
+
+
 async def create_task(req: CreateTask) -> Task:
-    task = Task(id=new_id(), title=req.title, notes=req.notes, priority=req.priority or "medium")
+    now = datetime.now(timezone.utc)
+    next_review_at = req.next_review_at
+    if next_review_at is None and req.review_interval_minutes:
+        next_review_at = now
+
+    task = Task(
+        id=new_id(),
+        title=req.title,
+        notes=req.notes,
+        status=req.status or "todo",
+        priority=req.priority or "medium",
+        progress=_normalize_progress(req.progress) or 0,
+        assignee=req.assignee,
+        parent_task_id=req.parent_task_id,
+        depends_on=list(req.depends_on or []),
+        blocked_by=list(req.blocked_by or []),
+        due_at=req.due_at,
+        next_review_at=next_review_at,
+        review_interval_minutes=req.review_interval_minutes,
+        last_activity_at=now,
+        outcome=req.outcome,
+        metadata=dict(req.metadata or {}),
+    )
     async with _STORAGE_LOCK:
         state = await asyncio.to_thread(_read_state_sync)
         state["tasks"].append(task.model_dump(mode="json"))
         await asyncio.to_thread(_write_state_sync, state)
+    _mark_vector_memory_dirty()
     return task
 
 
 async def update_task(tid: str, req: UpdateTask) -> bool:
+    return await patch_task(tid, req) is not None
+
+
+async def patch_task(tid: str, req: UpdateTask) -> Optional[Task]:
     updates = req.model_dump(exclude_none=True)
     if not updates:
-        return False
+        return None
+
+    if "progress" in updates:
+        updates["progress"] = _normalize_progress(updates["progress"])
 
     async with _STORAGE_LOCK:
         state = await asyncio.to_thread(_read_state_sync)
         for task in state["tasks"]:
             if task["id"] != tid:
                 continue
+            if req.review_interval_minutes is not None and req.next_review_at is None:
+                updates["next_review_at"] = datetime.now(timezone.utc).isoformat()
             task.update(updates)
-            task["updated_at"] = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(timezone.utc)
+            task["updated_at"] = now.isoformat()
+            task["last_activity_at"] = now.isoformat()
             await asyncio.to_thread(_write_state_sync, state)
-            return True
-    return False
+            _mark_vector_memory_dirty()
+            return Task(**task)
+    return None
 
 
 async def delete_task(tid: str) -> bool:
@@ -249,7 +316,42 @@ async def delete_task(tid: str) -> bool:
         changed = len(state["tasks"]) != original_len
         if changed:
             await asyncio.to_thread(_write_state_sync, state)
+            _mark_vector_memory_dirty()
         return changed
+
+
+async def get_tasks_due_for_review(
+    now: Optional[datetime] = None,
+    limit: int = 20,
+) -> list[Task]:
+    reference = now or datetime.now(timezone.utc)
+    tasks = await get_all_tasks()
+    due: list[Task] = []
+    for task in tasks:
+        if not _is_active_task_status(task.status):
+            continue
+        if task.next_review_at and task.next_review_at <= reference:
+            due.append(task)
+            continue
+        if task.review_interval_minutes and task.next_review_at is None:
+            due.append(task)
+    return sorted(
+        due,
+        key=lambda task: task.next_review_at or task.last_activity_at or task.created_at,
+    )[:limit]
+
+
+async def reschedule_task_review(tid: str, base_time: Optional[datetime] = None) -> Optional[Task]:
+    task = await get_task(tid)
+    if not task or not task.review_interval_minutes:
+        return task
+    next_review = (base_time or datetime.now(timezone.utc)) + timedelta(minutes=task.review_interval_minutes)
+    return await patch_task(
+        tid,
+        UpdateTask(
+            next_review_at=next_review,
+        ),
+    )
 
 
 # ── Tools ──
@@ -296,6 +398,7 @@ async def save_workflow(wf: Workflow):
         state["workflows"] = [item for item in state["workflows"] if item["id"] != wf.id]
         state["workflows"].append(wf.model_dump(mode="json"))
         await asyncio.to_thread(_write_state_sync, state)
+    _mark_vector_memory_dirty()
 
 
 async def delete_workflow(wid: str) -> bool:
@@ -306,6 +409,7 @@ async def delete_workflow(wid: str) -> bool:
         changed = len(state["workflows"]) != original_len
         if changed:
             await asyncio.to_thread(_write_state_sync, state)
+            _mark_vector_memory_dirty()
         return changed
 
 
@@ -317,6 +421,19 @@ async def update_workflow_last_run(wid: str):
                 workflow["last_run"] = datetime.now(timezone.utc).isoformat()
                 await asyncio.to_thread(_write_state_sync, state)
                 return
+
+
+async def set_workflow_enabled(wid: str, enabled: bool) -> Optional[Workflow]:
+    async with _STORAGE_LOCK:
+        state = await asyncio.to_thread(_read_state_sync)
+        for workflow in state["workflows"]:
+            if workflow["id"] != wid:
+                continue
+            workflow["enabled"] = enabled
+            await asyncio.to_thread(_write_state_sync, state)
+            _mark_vector_memory_dirty()
+            return Workflow(**workflow)
+    return None
 
 
 # ── Exec Log ──
@@ -367,6 +484,7 @@ async def save_conversation(cid: str, messages: list[ChatMessage]):
         state = await asyncio.to_thread(_read_state_sync)
         state["conversations"][cid] = record
         await asyncio.to_thread(_write_state_sync, state)
+    _mark_vector_memory_dirty()
 
 
 async def get_conversation(cid: str) -> list[ChatMessage]:
@@ -376,6 +494,15 @@ async def get_conversation(cid: str) -> list[ChatMessage]:
     if not record:
         return []
     return [ChatMessage(**message) for message in record.get("messages", [])]
+
+
+async def get_all_conversations() -> dict[str, list[ChatMessage]]:
+    async with _STORAGE_LOCK:
+        state = await asyncio.to_thread(_read_state_sync)
+    conversations: dict[str, list[ChatMessage]] = {}
+    for cid, record in state["conversations"].items():
+        conversations[cid] = [ChatMessage(**message) for message in record.get("messages", [])]
+    return conversations
 
 
 async def count_table(table: str) -> int:
@@ -393,3 +520,4 @@ async def count_table(table: str) -> int:
 async def reset_all():
     async with _STORAGE_LOCK:
         await asyncio.to_thread(_write_state_sync, _default_state())
+    _mark_vector_memory_dirty()

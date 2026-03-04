@@ -1,13 +1,15 @@
 import asyncio
 import json
 import time
-import re
 import os
 import httpx
 from datetime import datetime
 from pathlib import Path
 from app.schemas.models import ToolDef, ToolParam, ToolResult, new_id
 from app.services.shell import execute_command
+from app.schemas.models import SelfEditRunRequest, SelfEditWrite
+from app.services.self_edit import self_edit_service
+from app.services.vector_memory import vector_memory
 
 from typing import Optional
 
@@ -56,11 +58,23 @@ class ToolRegistry:
     def register_builtins(self):
         builtins = [
             ("shell", "Execute a shell command on the host OS. Full kernel access.",
-             [ToolParam(name="command", type="string", description="Command to execute")],
+             [ToolParam(name="command", type="string", description="Command to execute"),
+              ToolParam(name="working_dir", type="string", description="Optional working directory", required=False),
+              ToolParam(name="timeout_secs", type="integer", description="Optional timeout in seconds", required=False),
+              ToolParam(name="stdin", type="string", description="Optional stdin payload", required=False)],
              "_builtin_shell"),
             ("run_script", "Execute a multi-line bash script.",
-             [ToolParam(name="script", type="string", description="Script content")],
+             [ToolParam(name="script", type="string", description="Script content"),
+              ToolParam(name="working_dir", type="string", description="Optional working directory", required=False),
+              ToolParam(name="timeout_secs", type="integer", description="Optional timeout in seconds", required=False),
+              ToolParam(name="stdin", type="string", description="Optional stdin payload", required=False)],
              "_builtin_run_script"),
+            ("python_exec", "Execute a Python snippet in a subprocess.",
+             [ToolParam(name="code", type="string", description="Python code to execute"),
+              ToolParam(name="working_dir", type="string", description="Optional working directory", required=False),
+              ToolParam(name="timeout_secs", type="integer", description="Optional timeout in seconds", required=False),
+              ToolParam(name="stdin", type="string", description="Optional stdin payload", required=False)],
+             "_builtin_python_exec"),
             ("system_info", "Get system information (OS, memory, disk, CPU).", [], "_builtin_system_info"),
             ("kernel_info", "Get kernel version and system details.", [], "_builtin_kernel_info"),
             ("read_file", "Read the contents of a file.",
@@ -86,6 +100,25 @@ class ToolRegistry:
              [ToolParam(name="name", type="string", description="Variable name")],
              "_builtin_get_env"),
             ("network_info", "Get network interfaces and connections.", [], "_builtin_network_info"),
+            ("semantic_memory_search", "Search persistent memory semantically across preferences, tasks, facts, episodes, workflows, and conversations.",
+             [ToolParam(name="query", type="string", description="What to recall"),
+              ToolParam(name="limit", type="integer", description="Max results", required=False),
+              ToolParam(name="source_types_json", type="string", description="Optional JSON array of source types", required=False)],
+             "_builtin_semantic_memory_search"),
+            ("self_edit_pipeline", "Apply controlled code edits with snapshot, optional evaluation, optional tests, and automatic rollback on failure.",
+             [ToolParam(name="workspace", type="string", description="Workspace root to edit", required=False),
+              ToolParam(name="writes_json", type="string", description="JSON array of {path, content} objects"),
+              ToolParam(name="eval_command", type="string", description="Optional evaluation command", required=False),
+              ToolParam(name="test_command", type="string", description="Optional test command", required=False),
+              ToolParam(name="rollback_on_failure", type="boolean", description="Rollback if checks fail", required=False),
+              ToolParam(name="notes", type="string", description="Optional session notes", required=False)],
+             "_builtin_self_edit_pipeline"),
+            ("self_edit_status", "Inspect a prior self-edit session.",
+             [ToolParam(name="session_id", type="string", description="Self-edit session id")],
+             "_builtin_self_edit_status"),
+            ("self_edit_rollback", "Rollback a prior self-edit session.",
+             [ToolParam(name="session_id", type="string", description="Self-edit session id")],
+             "_builtin_self_edit_rollback"),
         ]
         for name, desc, params, handler in builtins:
             self._tools[name] = ToolDef(
@@ -99,15 +132,44 @@ async def _execute_builtin(name: str, params: dict) -> ToolResult:
         cmd = params.get("command", "")
         if not cmd:
             return ToolResult(success=False, error="No command provided")
-        r = await execute_command(cmd)
-        return ToolResult(success=r.exit_code == 0,
-                         result={"stdout": r.stdout, "stderr": r.stderr, "exit_code": r.exit_code})
+        r = await execute_command(
+            cmd,
+            working_dir=params.get("working_dir"),
+            timeout_secs=params.get("timeout_secs"),
+            stdin_data=params.get("stdin"),
+        )
+        return ToolResult(
+            success=r.exit_code == 0,
+            result={"stdout": r.stdout, "stderr": r.stderr, "exit_code": r.exit_code},
+        )
 
     elif name == "run_script":
         script = params.get("script", "")
-        r = await execute_command(f"bash -c {repr(script)}")
-        return ToolResult(success=r.exit_code == 0,
-                         result={"stdout": r.stdout, "stderr": r.stderr, "exit_code": r.exit_code})
+        r = await execute_command(
+            f"bash -c {repr(script)}",
+            working_dir=params.get("working_dir"),
+            timeout_secs=params.get("timeout_secs"),
+            stdin_data=params.get("stdin"),
+        )
+        return ToolResult(
+            success=r.exit_code == 0,
+            result={"stdout": r.stdout, "stderr": r.stderr, "exit_code": r.exit_code},
+        )
+
+    elif name == "python_exec":
+        code = params.get("code", "")
+        if not code:
+            return ToolResult(success=False, error="No Python code provided")
+        r = await execute_command(
+            f"python3 -c {repr(code)}",
+            working_dir=params.get("working_dir"),
+            timeout_secs=params.get("timeout_secs"),
+            stdin_data=params.get("stdin"),
+        )
+        return ToolResult(
+            success=r.exit_code == 0,
+            result={"stdout": r.stdout, "stderr": r.stderr, "exit_code": r.exit_code},
+        )
 
     elif name == "system_info":
         r = await execute_command("uname -a && echo '---' && free -h 2>/dev/null && echo '---' && df -h / 2>/dev/null && echo '---' && nproc 2>/dev/null")
@@ -191,6 +253,65 @@ async def _execute_builtin(name: str, params: dict) -> ToolResult:
         r = await execute_command("ip addr show 2>/dev/null || ifconfig 2>/dev/null; echo '---'; ss -tuln 2>/dev/null || netstat -tuln 2>/dev/null")
         return ToolResult(success=True, result=r.stdout)
 
+    elif name == "semantic_memory_search":
+        query = params.get("query", "")
+        if not query:
+            return ToolResult(success=False, error="No query provided")
+        source_types = None
+        raw_source_types = params.get("source_types_json")
+        if isinstance(raw_source_types, str) and raw_source_types.strip():
+            try:
+                parsed = json.loads(raw_source_types)
+                if isinstance(parsed, list):
+                    source_types = [str(item) for item in parsed]
+            except json.JSONDecodeError as exc:
+                return ToolResult(success=False, error=f"Invalid source_types_json: {exc}")
+        hits = await vector_memory.search(
+            query,
+            limit=int(params.get("limit", 8) or 8),
+            source_types=source_types,
+        )
+        return ToolResult(success=True, result=[hit.model_dump(mode="json") for hit in hits])
+
+    elif name == "self_edit_pipeline":
+        writes_json = params.get("writes_json", "")
+        if not writes_json:
+            return ToolResult(success=False, error="No writes_json provided")
+        try:
+            parsed_writes = json.loads(writes_json)
+        except json.JSONDecodeError as exc:
+            return ToolResult(success=False, error=f"Invalid writes_json: {exc}")
+        if not isinstance(parsed_writes, list):
+            return ToolResult(success=False, error="writes_json must decode to a list")
+        writes = [SelfEditWrite(**item) for item in parsed_writes]
+        session = await self_edit_service.run(
+            SelfEditRunRequest(
+                workspace=params.get("workspace"),
+                writes=writes,
+                eval_command=params.get("eval_command"),
+                test_command=params.get("test_command"),
+                rollback_on_failure=params.get("rollback_on_failure", True),
+                notes=params.get("notes"),
+            )
+        )
+        return ToolResult(success=session.status in {"applied", "verified"}, result=session.model_dump(mode="json"))
+
+    elif name == "self_edit_status":
+        session_id = params.get("session_id", "")
+        if not session_id:
+            return ToolResult(success=False, error="No session_id provided")
+        session = await self_edit_service.get(session_id)
+        if session is None:
+            return ToolResult(success=False, error=f"Session '{session_id}' not found")
+        return ToolResult(success=True, result=session.model_dump(mode="json"))
+
+    elif name == "self_edit_rollback":
+        session_id = params.get("session_id", "")
+        if not session_id:
+            return ToolResult(success=False, error="No session_id provided")
+        session = await self_edit_service.rollback(session_id)
+        return ToolResult(success=True, result=session.model_dump(mode="json"))
+
     return ToolResult(success=False, error=f"Unknown builtin: {name}")
 
 
@@ -203,34 +324,85 @@ async def _execute_user_tool(tool: ToolDef, params: dict) -> ToolResult:
 
     if handler.startswith("shell:"):
         cmd = handler[6:]
-        r = await execute_command(cmd)
-        return ToolResult(success=r.exit_code == 0,
-                         result={"stdout": r.stdout, "stderr": r.stderr, "exit_code": r.exit_code})
+        r = await execute_command(
+            cmd,
+            working_dir=params.get("working_dir"),
+            timeout_secs=params.get("timeout_secs"),
+            stdin_data=params.get("stdin"),
+        )
+        return ToolResult(
+            success=r.exit_code == 0,
+            result={"stdout": r.stdout, "stderr": r.stderr, "exit_code": r.exit_code},
+        )
 
     elif handler.startswith("script:"):
         script = handler[7:]
-        r = await execute_command(f"bash -c {repr(script)}")
-        return ToolResult(success=r.exit_code == 0,
-                         result={"stdout": r.stdout, "stderr": r.stderr, "exit_code": r.exit_code})
+        r = await execute_command(
+            f"bash -c {repr(script)}",
+            working_dir=params.get("working_dir"),
+            timeout_secs=params.get("timeout_secs"),
+            stdin_data=params.get("stdin"),
+        )
+        return ToolResult(
+            success=r.exit_code == 0,
+            result={"stdout": r.stdout, "stderr": r.stderr, "exit_code": r.exit_code},
+        )
 
     elif handler.startswith("python:"):
         code = handler[7:]
-        r = await execute_command(f"python3 -c {repr(code)}")
-        return ToolResult(success=r.exit_code == 0,
-                         result={"stdout": r.stdout, "stderr": r.stderr, "exit_code": r.exit_code})
+        r = await execute_command(
+            f"python3 -c {repr(code)}",
+            working_dir=params.get("working_dir"),
+            timeout_secs=params.get("timeout_secs"),
+            stdin_data=params.get("stdin"),
+        )
+        return ToolResult(
+            success=r.exit_code == 0,
+            result={"stdout": r.stdout, "stderr": r.stderr, "exit_code": r.exit_code},
+        )
 
     elif handler.startswith("http:"):
-        parts = handler[5:].split(":", 1)
-        if len(parts) < 2:
-            return ToolResult(success=False, error="Invalid HTTP handler: need http:METHOD:URL")
-        method, url = parts[0], parts[1]
+        spec = handler[5:]
+        method = "GET"
+        url = spec
+        if spec.startswith("http://") or spec.startswith("https://"):
+            url = spec
+        elif spec.count(":") >= 1 and spec.split(":", 1)[0].isalpha() and "://" in spec.split(":", 1)[1]:
+            method, url = spec.split(":", 1)
+
+        headers = params.get("headers")
+        if isinstance(headers, str):
+            try:
+                headers = json.loads(headers)
+            except json.JSONDecodeError:
+                headers = {}
+
+        json_body = params.get("json")
+        if isinstance(json_body, str):
+            try:
+                json_body = json.loads(json_body)
+            except json.JSONDecodeError:
+                pass
+
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.request(method, url)
-                return ToolResult(success=True, result={
-                    "status": resp.status_code, "body": resp.text[:50_000],
-                })
+            async with httpx.AsyncClient(timeout=params.get("timeout_secs", 30)) as client:
+                resp = await client.request(
+                    method.upper(),
+                    url,
+                    headers=headers if isinstance(headers, dict) else None,
+                    json=json_body if isinstance(json_body, (dict, list)) else None,
+                    content=params.get("body") if json_body is None else None,
+                )
+            return ToolResult(
+                success=resp.is_success,
+                result={
+                    "status": resp.status_code,
+                    "body": resp.text[:50_000],
+                    "headers": dict(resp.headers),
+                },
+                error=None if resp.is_success else f"HTTP {resp.status_code}",
+            )
         except Exception as e:
             return ToolResult(success=False, error=str(e))
 
-    return ToolResult(success=False, error=f"Unknown handler format: {handler[:30]}")
+    return ToolResult(success=False, error=f"Unsupported tool handler: {tool.handler}")

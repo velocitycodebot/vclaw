@@ -14,8 +14,8 @@ def new_id(prefix: str = "") -> str:
 class Preferences(BaseModel):
     name: str = ""
     tone: str = "friendly"
-    topics: list[str] = []
-    custom: dict[str, Any] = {}
+    topics: list[str] = Field(default_factory=list)
+    custom: dict[str, Any] = Field(default_factory=dict)
 
 
 # ── Memory ──
@@ -40,6 +40,16 @@ class Task(BaseModel):
     status: str = "todo"
     priority: str = "medium"
     progress: int = 0
+    assignee: Optional[str] = None
+    parent_task_id: Optional[str] = None
+    depends_on: list[str] = Field(default_factory=list)
+    blocked_by: list[str] = Field(default_factory=list)
+    due_at: Optional[datetime] = None
+    next_review_at: Optional[datetime] = None
+    review_interval_minutes: Optional[int] = None
+    last_activity_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    outcome: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -48,6 +58,17 @@ class CreateTask(BaseModel):
     title: str
     notes: Optional[str] = None
     priority: Optional[str] = "medium"
+    status: Optional[str] = "todo"
+    progress: Optional[int] = 0
+    assignee: Optional[str] = None
+    parent_task_id: Optional[str] = None
+    depends_on: Optional[list[str]] = None
+    blocked_by: Optional[list[str]] = None
+    due_at: Optional[datetime] = None
+    next_review_at: Optional[datetime] = None
+    review_interval_minutes: Optional[int] = None
+    outcome: Optional[str] = None
+    metadata: Optional[dict[str, Any]] = None
 
 
 class UpdateTask(BaseModel):
@@ -56,6 +77,15 @@ class UpdateTask(BaseModel):
     status: Optional[str] = None
     priority: Optional[str] = None
     progress: Optional[int] = None
+    assignee: Optional[str] = None
+    parent_task_id: Optional[str] = None
+    depends_on: Optional[list[str]] = None
+    blocked_by: Optional[list[str]] = None
+    due_at: Optional[datetime] = None
+    next_review_at: Optional[datetime] = None
+    review_interval_minutes: Optional[int] = None
+    outcome: Optional[str] = None
+    metadata: Optional[dict[str, Any]] = None
 
 
 # ── Tools ──
@@ -70,7 +100,7 @@ class ToolDef(BaseModel):
     id: str = ""
     name: str
     description: str
-    params: list[ToolParam] = []
+    params: list[ToolParam] = Field(default_factory=list)
     builtin: bool = False
     handler: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -84,14 +114,31 @@ class ToolResult(BaseModel):
 
 
 class ToolExecRequest(BaseModel):
-    params: dict[str, Any] = {}
+    params: dict[str, Any] = Field(default_factory=dict)
 
 
 class CreateToolRequest(BaseModel):
     name: str
     description: str
-    params: list[ToolParam] = []
+    params: list[ToolParam] = Field(default_factory=list)
     handler: str
+
+
+class VectorMemorySearchHit(BaseModel):
+    source_type: str
+    source_id: str
+    text: str
+    score: float = 0.0
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class VectorMemoryStatus(BaseModel):
+    provider: str = "uninitialized"
+    dimensions: int = 0
+    documents: int = 0
+    degraded: bool = False
+    dirty: bool = True
+    last_rebuilt_at: Optional[datetime] = None
 
 
 # ── Shell ──
@@ -112,19 +159,55 @@ class ShellResult(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class SelfEditWrite(BaseModel):
+    path: str
+    content: str
+
+
+class SelfEditRunRequest(BaseModel):
+    workspace: Optional[str] = None
+    writes: list[SelfEditWrite] = Field(default_factory=list)
+    eval_command: Optional[str] = None
+    test_command: Optional[str] = None
+    rollback_on_failure: bool = True
+    notes: Optional[str] = None
+
+
+class SelfEditSession(BaseModel):
+    id: str = ""
+    workspace: str
+    writes: list[SelfEditWrite] = Field(default_factory=list)
+    eval_command: Optional[str] = None
+    test_command: Optional[str] = None
+    rollback_on_failure: bool = True
+    status: str = "pending"
+    changed_files: list[str] = Field(default_factory=list)
+    created_files: list[str] = Field(default_factory=list)
+    snapshot_dir: str = ""
+    eval_result: Optional[ShellResult] = None
+    test_result: Optional[ShellResult] = None
+    rolled_back: bool = False
+    notes: Optional[str] = None
+    error: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 # ── Workflows ──
 class WorkflowStep(BaseModel):
     tool_name: str
-    params: dict[str, Any] = {}
+    params: dict[str, Any] = Field(default_factory=dict)
     continue_on_error: Optional[bool] = False
     delay_ms: Optional[int] = None
 
 
 class WorkflowSchedule(BaseModel):
-    type: str  # interval | daily
+    type: str  # interval | daily | weekly
     interval_ms: Optional[int] = None
     hour: Optional[int] = None
     minute: Optional[int] = None
+    days_of_week: list[int] = Field(default_factory=list)
+    timezone: Optional[str] = None
     label: str = ""
 
 
@@ -132,7 +215,7 @@ class Workflow(BaseModel):
     id: str = ""
     name: str
     description: Optional[str] = None
-    steps: list[WorkflowStep] = []
+    steps: list[WorkflowStep] = Field(default_factory=list)
     schedule: Optional[WorkflowSchedule] = None
     enabled: bool = False
     last_run: Optional[datetime] = None
@@ -142,7 +225,7 @@ class Workflow(BaseModel):
 class CreateWorkflow(BaseModel):
     name: str
     description: Optional[str] = None
-    steps: list[WorkflowStep] = []
+    steps: list[WorkflowStep] = Field(default_factory=list)
     schedule: Optional[WorkflowSchedule] = None
 
 
@@ -173,6 +256,12 @@ class ChatRequest(BaseModel):
     conversation_id: Optional[str] = None
 
 
+class MemorySearchRequest(BaseModel):
+    query: str
+    limit: int = 8
+    source_types: Optional[list[str]] = None
+
+
 # ── Agents ──
 class AgentStatus(str, Enum):
     IDLE = "idle"
@@ -188,7 +277,7 @@ class AgentStatus(str, Enum):
 class AgentConfig(BaseModel):
     role: str
     goal: str
-    tools: list[str] = []
+    tools: list[str] = Field(default_factory=list)
     max_iterations: int = 20
     timeout_secs: int = 300
     auto_terminate: bool = True
@@ -220,10 +309,11 @@ class AgentDef(BaseModel):
     config: AgentConfig
     status: AgentStatus = AgentStatus.IDLE
     parent_id: Optional[str] = None
-    children: list[str] = []
-    messages: list[ChatMessage] = []
+    children: list[str] = Field(default_factory=list)
+    messages: list[ChatMessage] = Field(default_factory=list)
     result: Optional[str] = None
     iterations: int = 0
+    last_children_digest: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = None
@@ -248,20 +338,20 @@ class AgentMessageRequest(BaseModel):
 # ── AI Response Parsing ──
 class AIToolCall(BaseModel):
     tool: str
-    params: dict[str, Any] = {}
+    params: dict[str, Any] = Field(default_factory=dict)
 
 
 class AIToolCreate(BaseModel):
     name: str
     description: str
-    params: list[ToolParam] = []
+    params: list[ToolParam] = Field(default_factory=list)
     handler: str
 
 
 class AIWorkflowDefine(BaseModel):
     name: str
     description: Optional[str] = None
-    steps: list[WorkflowStep] = []
+    steps: list[WorkflowStep] = Field(default_factory=list)
     schedule: Optional[WorkflowSchedule] = None
 
 
@@ -291,36 +381,57 @@ class AIAgentComplete(BaseModel):
     result: str
 
 
+class AITaskOperation(BaseModel):
+    action: str = "update"
+    task_id: Optional[str] = None
+    title: Optional[str] = None
+    notes: Optional[str] = None
+    status: Optional[str] = None
+    priority: Optional[str] = None
+    progress: Optional[int] = None
+    assignee: Optional[str] = None
+    parent_task_id: Optional[str] = None
+    depends_on: Optional[list[str]] = None
+    blocked_by: Optional[list[str]] = None
+    due_at: Optional[datetime] = None
+    next_review_at: Optional[datetime] = None
+    review_interval_minutes: Optional[int] = None
+    outcome: Optional[str] = None
+    metadata: Optional[dict[str, Any]] = None
+
+
 class ParsedAIResponse(BaseModel):
     clean_text: str = ""
-    tool_calls: list[AIToolCall] = []
-    tool_creates: list[AIToolCreate] = []
-    workflow_defines: list[AIWorkflowDefine] = []
+    tool_calls: list[AIToolCall] = Field(default_factory=list)
+    tool_creates: list[AIToolCreate] = Field(default_factory=list)
+    workflow_defines: list[AIWorkflowDefine] = Field(default_factory=list)
     memory_update: Optional[AIMemoryUpdate] = None
-    agent_spawns: list[AIAgentSpawn] = []
-    agent_messages: list[AIAgentMessage] = []
+    task_operations: list[AITaskOperation] = Field(default_factory=list)
+    agent_spawns: list[AIAgentSpawn] = Field(default_factory=list)
+    agent_messages: list[AIAgentMessage] = Field(default_factory=list)
     agent_complete: Optional[AIAgentComplete] = None
-    assistant_blocks: list[dict[str, Any]] = []
-    tool_use_blocks: list[dict[str, Any]] = []
+    assistant_blocks: list[dict[str, Any]] = Field(default_factory=list)
+    tool_use_blocks: list[dict[str, Any]] = Field(default_factory=list)
     stop_reason: Optional[str] = None
-    usage: dict[str, Any] = {}
+    usage: dict[str, Any] = Field(default_factory=dict)
 
 
 class ToolCallResult(BaseModel):
     tool: str
-    params: dict[str, Any] = {}
+    params: dict[str, Any] = Field(default_factory=dict)
     result: ToolResult
 
 
 class AgentStepResult(BaseModel):
     agent_id: str
     response: str = ""
-    tool_calls: list[ToolCallResult] = []
-    agents_spawned: list[str] = []
-    agents_messaged: list[str] = []
-    tools_created: list[ToolDef] = []
-    workflows_created: list[Workflow] = []
-    memory_facts_added: list[str] = []
+    tool_calls: list[ToolCallResult] = Field(default_factory=list)
+    agents_spawned: list[str] = Field(default_factory=list)
+    agents_messaged: list[str] = Field(default_factory=list)
+    tools_created: list[ToolDef] = Field(default_factory=list)
+    workflows_created: list[Workflow] = Field(default_factory=list)
+    tasks_changed: list[Task] = Field(default_factory=list)
+    memory_facts_added: list[str] = Field(default_factory=list)
     preferences_updated: Optional[dict[str, Any]] = None
     needs_model_followup: bool = False
     status_change: Optional[str] = None

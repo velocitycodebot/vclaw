@@ -4,11 +4,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from app.schemas.models import (
     AgentDef, AgentConfig, AgentStatus, AgentMessage, AgentMsgType,
-    ChatMessage, ExecLogEntry, ToolCallResult, ToolDef, ToolParam,
-    Workflow, AgentStepResult, new_id,
+    ChatMessage, CreateTask, ExecLogEntry, ToolCallResult, ToolDef, ToolParam,
+    UpdateTask, Workflow, AgentStepResult, AITaskOperation, new_id,
 )
 import app.clients.claude as claude_client
 import app.storage.database as db
+from app.services.context import build_context_bundle
 
 
 class AgentRegistry:
@@ -16,11 +17,13 @@ class AgentRegistry:
         self.agents: dict[str, AgentDef] = {}
         self.messages: list[AgentMessage] = []
         self.main_agent_id = "main"
+        self._active_loops: set[str] = set()
+        self._agent_locks: dict[str, asyncio.Lock] = {}
 
         # Create main orchestrator
         main = AgentDef(
             id="main",
-            name="Orchestrator",
+            name="AgentOS",
             config=AgentConfig(
                 role="Main orchestrator agent that manages all sub-agents",
                 goal="Serve the user by delegating tasks to specialized sub-agents and coordinating their work",
@@ -41,6 +44,7 @@ class AgentRegistry:
         )
         if parent_id and parent_id in self.agents:
             self.agents[parent_id].children.append(aid)
+            self.agents[parent_id].last_children_digest = ""
         self.agents[aid] = agent
         print(f"🤖 Spawned agent '{name}' ({aid})")
         return aid
@@ -108,6 +112,25 @@ class AgentRegistry:
     def total_count(self) -> int:
         return len(self.agents)
 
+    def get_lock(self, aid: str) -> asyncio.Lock:
+        lock = self._agent_locks.get(aid)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._agent_locks[aid] = lock
+        return lock
+
+    def start_loop(self, aid: str) -> bool:
+        if aid in self._active_loops:
+            return False
+        self._active_loops.add(aid)
+        return True
+
+    def finish_loop(self, aid: str):
+        self._active_loops.discard(aid)
+
+    def loop_active(self, aid: str) -> bool:
+        return aid in self._active_loops
+
 
 def _tool_result_block(tool_use_id: str, payload: Any, *, is_error: bool = False) -> dict[str, Any]:
     if isinstance(payload, str):
@@ -146,11 +169,56 @@ async def _apply_preference_updates(updates: dict[str, Any]) -> dict[str, Any]:
     return merged.model_dump(mode="json")
 
 
+async def _apply_task_operation(operation: AITaskOperation, agent_id: str) -> Any:
+    action = (operation.action or "update").lower()
+    payload = {
+        "title": operation.title,
+        "notes": operation.notes,
+        "status": operation.status,
+        "priority": operation.priority,
+        "progress": operation.progress,
+        "assignee": operation.assignee,
+        "parent_task_id": operation.parent_task_id,
+        "depends_on": operation.depends_on,
+        "blocked_by": operation.blocked_by,
+        "due_at": operation.due_at,
+        "next_review_at": operation.next_review_at,
+        "review_interval_minutes": operation.review_interval_minutes,
+        "outcome": operation.outcome,
+        "metadata": operation.metadata,
+    }
+
+    if action == "create":
+        if not operation.title:
+            raise ValueError("Task creation requires a title")
+        task = await db.create_task(CreateTask(**payload))
+        await db.add_episode(f"Task created by {agent_id}: {task.title} [{task.status}]")
+        return task
+
+    if not operation.task_id:
+        raise ValueError("Task update requires task_id")
+
+    if action == "complete":
+        if payload["status"] is None:
+            payload["status"] = "done"
+        if payload["progress"] is None:
+            payload["progress"] = 100
+
+    task = await db.patch_task(operation.task_id, UpdateTask(**payload))
+    if not task:
+        raise ValueError(f"Task '{operation.task_id}' not found")
+
+    await db.add_episode(
+        f"Task updated by {agent_id}: {task.title} [{task.status}] {task.progress}%"
+    )
+    return task
+
+
 # ═══════════════════════════════════════════
 # AGENT STEP EXECUTOR
 # ═══════════════════════════════════════════
 
-async def execute_agent_step(
+async def _execute_agent_step_inner(
     registry: AgentRegistry,
     tool_registry,
     workflow_engine,
@@ -182,6 +250,22 @@ async def execute_agent_step(
 
     workflows = workflow_engine.list_all()
 
+    messages = list(agent.messages)
+    if user_input:
+        inbound = ChatMessage(role="user", content=user_input, timestamp=datetime.now(timezone.utc))
+        agent.messages.append(inbound)
+        messages.append(inbound)
+
+    context = await build_context_bundle(
+        user_input=user_input,
+        fallback_focus=agent.config.goal,
+        tasks=tasks,
+        facts=facts,
+        episodes=episodes,
+        workflows=workflows,
+        messages=messages,
+    )
+
     sibling_info = []
     if agent.parent_id:
         for s in registry.list_children(agent.parent_id):
@@ -196,22 +280,13 @@ async def execute_agent_step(
         child_info.append(line)
 
     system_prompt = claude_client.build_agent_system_prompt(
-        agent, prefs, tasks, facts, episodes,
-        filtered_tools, workflows, sibling_info, child_info,
+        agent, prefs, context.tasks, context.facts, context.episodes,
+        filtered_tools, context.workflows, sibling_info, child_info,
+        focus=context.focus,
+        semantic_memory=context.semantic_memory,
     )
 
-    messages = list(agent.messages)
-    if user_input:
-        inbound = ChatMessage(role="user", content=user_input, timestamp=datetime.now(timezone.utc))
-        agent.messages.append(inbound)
-        messages.append(inbound)
-
-    # Trim context window
-    if len(messages) > 24:
-        ctx = [messages[0]]
-        ctx.append(ChatMessage(role="user", content="[earlier messages summarized — focus on current task]"))
-        ctx.extend(messages[-22:])
-        messages = ctx
+    messages = context.messages
 
     # Call Claude
     try:
@@ -300,6 +375,18 @@ async def execute_agent_step(
                         "ok": True,
                         "facts_added": len(step.memory_facts_added),
                         "preferences_updated": bool(step.preferences_updated),
+                    }
+                    is_error = False
+
+                elif tool_name == claude_client.CONTROL_TOOL_TASK:
+                    task_op = claude_client.AITaskOperation(**tool_input)
+                    task = await _apply_task_operation(task_op, agent_id)
+                    step.tasks_changed.append(task)
+                    payload = {
+                        "ok": True,
+                        "task_id": task.id,
+                        "status": task.status,
+                        "progress": task.progress,
                     }
                     is_error = False
 
@@ -480,6 +567,11 @@ async def execute_agent_step(
         workflow_engine.register(wf)
         step.workflows_created.append(wf)
 
+    # ── Handle task operations ──
+    for task_op in parsed.task_operations:
+        task = await _apply_task_operation(task_op, agent_id)
+        step.tasks_changed.append(task)
+
     # ── Handle memory updates ──
     if parsed.memory_update:
         if parsed.memory_update.facts:
@@ -498,6 +590,19 @@ async def execute_agent_step(
     return step
 
 
+async def execute_agent_step(
+    registry: AgentRegistry,
+    tool_registry,
+    workflow_engine,
+    agent_id: str,
+    user_input: Optional[str] = None,
+) -> AgentStepResult:
+    async with registry.get_lock(agent_id):
+        return await _execute_agent_step_inner(
+            registry, tool_registry, workflow_engine, agent_id, user_input
+        )
+
+
 # ═══════════════════════════════════════════
 # AGENT LOOP — runs a sub-agent to completion
 # ═══════════════════════════════════════════
@@ -512,86 +617,98 @@ async def run_agent_loop(
     agent = registry.get_agent(agent_id)
     if not agent:
         return "Agent not found"
+    if not registry.start_loop(agent_id):
+        return agent.result or "Agent loop already running"
 
-    max_iterations = agent.config.max_iterations
-    timeout_secs = agent.config.timeout_secs
-    deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout_secs) if timeout_secs > 0 else None
+    try:
+        max_iterations = agent.config.max_iterations
+        timeout_secs = agent.config.timeout_secs
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout_secs) if timeout_secs > 0 else None
 
-    iteration = 0
-    last_input = initial_input
+        iteration = 0
+        last_input = initial_input
 
-    while True:
-        iteration += 1
+        while True:
+            iteration += 1
 
-        if iteration > max_iterations:
-            agent.status = AgentStatus.FAILED
-            agent.result = "Exceeded maximum iterations"
-            agent.completed_at = datetime.now(timezone.utc)
-            return "Exceeded maximum iterations"
+            if iteration > max_iterations:
+                agent.status = AgentStatus.FAILED
+                agent.result = "Exceeded maximum iterations"
+                agent.completed_at = datetime.now(timezone.utc)
+                return "Exceeded maximum iterations"
 
-        if deadline and datetime.now(timezone.utc) > deadline:
-            agent.status = AgentStatus.FAILED
-            agent.result = "Timed out"
-            agent.completed_at = datetime.now(timezone.utc)
-            return "Timed out"
+            if deadline and datetime.now(timezone.utc) > deadline:
+                agent.status = AgentStatus.FAILED
+                agent.result = "Timed out"
+                agent.completed_at = datetime.now(timezone.utc)
+                return "Timed out"
 
-        agent = registry.get_agent(agent_id)
-        if not agent:
-            return "Agent removed"
-        if agent.status == AgentStatus.TERMINATED:
-            return "Terminated"
-        if agent.status == AgentStatus.COMPLETED:
-            return agent.result or ""
+            agent = registry.get_agent(agent_id)
+            if not agent:
+                return "Agent removed"
+            if agent.status == AgentStatus.TERMINATED:
+                return "Terminated"
+            if agent.status == AgentStatus.COMPLETED:
+                return agent.result or ""
 
-        try:
-            result = await execute_agent_step(
-                registry, tool_registry, workflow_engine, agent_id, last_input
-            )
-        except Exception as e:
-            print(f"Agent {agent_id} step error: {e}")
-            agent.status = AgentStatus.FAILED
-            agent.result = str(e)
-            return str(e)
-
-        last_input = None
-
-        if result.status_change == "completed":
-            return registry.get_agent(agent_id).result or ""
-
-        if result.needs_model_followup:
-            continue
-
-        # Wait for sub-agents
-        agent = registry.get_agent(agent_id)
-        if agent and agent.status == AgentStatus.WAITING_SUBAGENT:
-            while True:
-                await asyncio.sleep(2)
-                agent = registry.get_agent(agent_id)
-                if not agent:
-                    return "Agent removed"
-
-                all_done = all(
-                    registry.get_agent(cid) is None or
-                    registry.get_agent(cid).status in (AgentStatus.COMPLETED, AgentStatus.FAILED, AgentStatus.TERMINATED)
-                    for cid in agent.children
+            try:
+                result = await execute_agent_step(
+                    registry, tool_registry, workflow_engine, agent_id, last_input
                 )
+            except Exception as e:
+                print(f"Agent {agent_id} step error: {e}")
+                agent.status = AgentStatus.FAILED
+                agent.result = str(e)
+                return str(e)
 
-                if all_done:
-                    child_results = "\n".join(
-                        f"Agent '{c.name}' ({c.id}): {c.status.value} — Result: {c.result or 'no result'}"
+            last_input = None
+
+            if result.status_change == "completed":
+                return registry.get_agent(agent_id).result or ""
+
+            if result.needs_model_followup:
+                continue
+
+            # Wait for sub-agents
+            agent = registry.get_agent(agent_id)
+            if agent and agent.status == AgentStatus.WAITING_SUBAGENT:
+                while True:
+                    await asyncio.sleep(2)
+                    agent = registry.get_agent(agent_id)
+                    if not agent:
+                        return "Agent removed"
+
+                    all_done = all(
+                        registry.get_agent(cid) is None or
+                        registry.get_agent(cid).status in (AgentStatus.COMPLETED, AgentStatus.FAILED, AgentStatus.TERMINATED)
                         for cid in agent.children
-                        if (c := registry.get_agent(cid))
                     )
-                    last_input = f"All sub-agents have completed. Results:\n{child_results}\n\nProcess these results and continue."
-                    agent.status = AgentStatus.RUNNING
-                    break
 
-                if deadline and datetime.now(timezone.utc) > deadline:
-                    break
+                    if all_done:
+                        child_results = "\n".join(
+                            f"Agent '{c.name}' ({c.id}): {c.status.value} — Result: {c.result or 'no result'}"
+                            for cid in agent.children
+                            if (c := registry.get_agent(cid))
+                        )
+                        last_input = (
+                            "All sub-agents have completed. Results:\n"
+                            f"{child_results}\n\nProcess these results and continue."
+                        )
+                        agent.status = AgentStatus.RUNNING
+                        break
 
-            continue
+                    if deadline and datetime.now(timezone.utc) > deadline:
+                        break
 
-        if agent and agent.status == AgentStatus.IDLE and not result.agents_spawned:
-            break
+                continue
 
-    return "Agent loop ended"
+            if agent and agent.status == AgentStatus.IDLE and not result.agents_spawned:
+                break
+
+        return "Agent loop ended"
+    finally:
+        if agent_id == registry.main_agent_id:
+            main_agent = registry.get_agent(agent_id)
+            if main_agent:
+                await db.save_conversation("main_conv", main_agent.messages)
+        registry.finish_loop(agent_id)
