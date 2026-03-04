@@ -72,7 +72,8 @@ function ChatPanel() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
-  const [convId, setConvId] = useState(null);
+  const [sessionId, setSessionId] = useState(null);
+  const [freshSession, setFreshSession] = useState(true);
   const bottomRef = useRef(null);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
@@ -84,9 +85,10 @@ function ChatPanel() {
     setMessages(prev => [...prev, { role: 'user', content: text, time: new Date() }]);
     setSending(true);
     try {
-      const data = await api('/api/chat', { method: 'POST', body: JSON.stringify({ message: text, conversation_id: convId }) });
+      const data = await api('/api/chat', { method: 'POST', body: JSON.stringify({ message: text, session_id: sessionId, new_session: freshSession }) });
       if (data) {
-        setConvId(data.conversation_id);
+        setSessionId(data.session_id || data.conversation_id || null);
+        setFreshSession(false);
         const newMsgs = [];
         if (data.agents_spawned?.length) data.agents_spawned.forEach(a => newMsgs.push({ role: 'spawn', content: `🤖 Spawned: ${a.name} — ${a.role}`, time: new Date() }));
         newMsgs.push({ role: 'assistant', content: data.message || 'No response', time: new Date() });
@@ -111,7 +113,7 @@ function ChatPanel() {
           {suggestions.map(s => <button key={s} onClick={() => setInput(s)} style={{ padding: '6px 14px', borderRadius: 20, background: 'var(--bg2)', color: 'var(--fg2)', border: '1px solid var(--brd)', cursor: 'pointer', fontSize: 11, fontFamily: 'inherit' }}>{s}</button>)}
         </div>
       </div>
-      <ChatInput input={input} setInput={setInput} send={send} onNew={() => { setMessages([]); setConvId(null); }} sending={sending} />
+      <ChatInput input={input} setInput={setInput} send={send} onNew={() => { setMessages([]); setSessionId(null); setFreshSession(true); }} sending={sending} />
     </div>
   );
 
@@ -134,7 +136,7 @@ function ChatPanel() {
         {sending && <div style={{ display: 'flex', gap: 5, padding: 12, alignItems: 'center' }}><div style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--accent)', animation: 'pulse 1s 0s infinite' }} /><div style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--accent)', animation: 'pulse 1s .15s infinite' }} /><div style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--accent)', animation: 'pulse 1s .3s infinite' }} /><span style={{ fontSize: 11, color: 'var(--fg3)', marginLeft: 6, fontFamily: 'var(--mono)' }}>orchestrating…</span></div>}
         <div ref={bottomRef} />
       </div>
-      <ChatInput input={input} setInput={setInput} send={send} onNew={() => { setMessages([]); setConvId(null); }} sending={sending} />
+      <ChatInput input={input} setInput={setInput} send={send} onNew={() => { setMessages([]); setSessionId(null); setFreshSession(true); }} sending={sending} />
     </div>
   );
 }
@@ -454,13 +456,76 @@ function LogsPanel() {
 function MemoryPanel() {
   const [facts, setFacts] = useState([]);
   const [episodes, setEpisodes] = useState([]);
+  const [files, setFiles] = useState([]);
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [fileContent, setFileContent] = useState('');
+  const [draftContent, setDraftContent] = useState('');
+  const [savingFile, setSavingFile] = useState(false);
   useEffect(() => { load(); }, []);
-  const load = async () => { const d = await api('/api/memory'); if (d) { setFacts(d.facts || []); setEpisodes(d.episodes || []); } };
+  const load = async () => {
+    const d = await api('/api/memory');
+    if (d) {
+      setFacts(d.facts || []);
+      setEpisodes(d.episodes || []);
+      setFiles(d.files || []);
+      if (!selectedFile && d.files?.length) loadFile(d.files[0].name);
+    }
+  };
+  const loadFile = async (name) => {
+    const d = await api(`/api/memory/files/${encodeURIComponent(name)}`);
+    if (d && !d.error) {
+      setSelectedFile(name);
+      setFileContent(d.content || '');
+      setDraftContent(d.content || '');
+    }
+  };
   const del = async (id) => { await api(`/api/memory/facts/${id}`, { method: 'DELETE' }); load(); };
+  const saveLongTermMemory = async () => {
+    if (selectedFile !== 'MEMORY.md' || savingFile) return;
+    setSavingFile(true);
+    try {
+      const d = await api(`/api/memory/files/${encodeURIComponent(selectedFile)}`, { method: 'PUT', body: JSON.stringify({ content: draftContent }) });
+      if (d && !d.error) {
+        setFileContent(d.content || '');
+        setDraftContent(d.content || '');
+        load();
+      }
+    } finally {
+      setSavingFile(false);
+    }
+  };
+  const isLongTermMemory = selectedFile === 'MEMORY.md';
 
   return (
     <div style={S.panel}>
       <h2 style={{ fontSize: 16, fontWeight: 600, color: 'var(--fg0)', marginBottom: 16 }}>Agent Memory</h2>
+      <h3 style={{ ...S.sectionTitle, color: 'var(--cyan)' }}>Markdown Workspace</h3>
+      <div style={{ display: 'grid', gridTemplateColumns: '180px 1fr', gap: 12, marginBottom: 20 }}>
+        <div>
+          {!files.length && <p style={{ fontSize: 12, color: 'var(--fg3)', fontStyle: 'italic' }}>No memory files yet.</p>}
+          {files.map(f => (
+            <button key={f.name} onClick={() => loadFile(f.name)} style={{ ...S.btn, ...(selectedFile === f.name ? S.cyanBtn : S.ghost), width: '100%', justifyContent: 'space-between', marginBottom: 6, padding: '6px 10px', fontSize: 11 }}>
+              <span>{f.name}</span>
+              <span style={{ fontFamily: 'var(--mono)', fontSize: 9 }}>{f.kind}</span>
+            </button>
+          ))}
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {isLongTermMemory ? (
+            <>
+              <textarea value={draftContent} onChange={e => setDraftContent(e.target.value)} style={{ ...S.monoInput, minHeight: 220, maxHeight: 320, padding: 12, fontSize: 11 }} placeholder="Add durable persona and business context here…" />
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: 10, color: 'var(--fg3)' }}>Use this file for character persona, company context, and durable instructions.</span>
+                <button onClick={saveLongTermMemory} disabled={savingFile || draftContent === fileContent} style={{ ...S.btn, ...(draftContent === fileContent ? S.ghost : S.primary), padding: '6px 12px', fontSize: 11 }}>
+                  {savingFile ? 'Saving…' : 'Save MEMORY.md'}
+                </button>
+              </div>
+            </>
+          ) : (
+            <pre style={{ minHeight: 180, maxHeight: 280, overflow: 'auto', padding: 12, background: 'var(--bg1)', border: '1px solid var(--brd)', borderRadius: 8, fontSize: 11, color: 'var(--fg1)', fontFamily: 'var(--mono)', whiteSpace: 'pre-wrap' }}>{fileContent || 'Select a memory file to preview it.'}</pre>
+          )}
+        </div>
+      </div>
       <h3 style={{ ...S.sectionTitle, color: 'var(--accent)' }}>Learned Facts</h3>
       {!facts.length && <p style={{ fontSize: 12, color: 'var(--fg3)', textAlign: 'center', padding: 20, fontStyle: 'italic' }}>No facts yet.</p>}
       {facts.map(f => <div key={f.id} style={{ ...S.card, display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 10px', marginBottom: 3 }}><span style={{ fontSize: 11 }}>{f.text}</span><button onClick={() => del(f.id)} style={{ ...S.btn, ...S.danger, padding: '2px 6px', fontSize: 9 }}>×</button></div>)}

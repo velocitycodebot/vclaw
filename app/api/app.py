@@ -14,11 +14,14 @@ from app.schemas.models import (
     ToolDef, ToolResult, ShellExecRequest, CreateWorkflow, Workflow,
     ExecLogEntry, MemorySearchRequest, Preferences, SelfEditRunRequest, SpawnAgentRequest, AgentConfig,
     AgentMessageRequest, AgentMsgType, AgentStatus, SystemStatus, new_id,
+    MemoryFileUpdateRequest, MemoryWriteRequest, MemoryWorkspaceSearchRequest, SessionResetRequest,
 )
 from app.services.tools import ToolRegistry
 from app.services.workflows import WorkflowEngine, execute_workflow, run_scheduler
 from app.services.agents import AgentRegistry, execute_agent_step, run_agent_loop
+from app.services.memory_workspace import memory_workspace
 from app.services.orchestrator import run_orchestrator_loop
+from app.services.session_manager import session_manager
 from app.services.self_edit import self_edit_service
 from app.services.vector_memory import vector_memory
 import app.services.shell as shell_mod
@@ -35,8 +38,12 @@ async def lifespan(app: FastAPI):
     # Startup
     await db.initialize()
     print("✓ Database initialized")
+    await session_manager.initialize()
+    await memory_workspace.initialize()
     await vector_memory.initialize()
     await self_edit_service.initialize()
+    print("✓ Session manager initialized")
+    print("✓ Markdown memory workspace initialized")
     print("✓ Vector memory initialized")
     print("✓ Self-edit pipeline initialized")
 
@@ -78,13 +85,16 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 @app.post("/api/chat")
 async def chat_handler(req: ChatRequest):
-    conv_id = req.conversation_id or "main_conv"
+    session = await session_manager.resolve_chat_session(req)
+    session_messages = await session_manager.load_messages(session.id)
 
     # Load history into main agent
-    existing = await db.get_conversation(conv_id)
     main = agent_registry.get_agent("main")
-    if main and not main.messages and existing:
-        main.messages = existing
+    if main:
+        main.messages = session_messages
+        if main.status in (AgentStatus.COMPLETED, AgentStatus.FAILED, AgentStatus.TERMINATED):
+            main.status = AgentStatus.IDLE
+            main.result = None
 
     # Execute main agent step
     step = await execute_agent_step(
@@ -135,14 +145,17 @@ async def chat_handler(req: ChatRequest):
     # Save conversation
     main = agent_registry.get_agent("main")
     if main:
-        await db.save_conversation(conv_id, main.messages)
+        await session_manager.save_messages(session.id, main.messages)
 
     summary = f"User: {req.message[:60]}… → Agent responded" if len(req.message) > 60 else f"User: {req.message} → Agent responded"
     await db.add_episode(summary)
 
     return {
         "message": final_text,
-        "conversation_id": conv_id,
+        "conversation_id": session.id,
+        "session_id": session.id,
+        "session_key": session.session_key,
+        "dm_scope": session.dm_scope.value,
         "tool_calls": [tc.model_dump() for tc in all_tool_calls],
         "agents_spawned": agents_info,
         "tools_created": [tool.model_dump() for tool in all_tools_created],
@@ -163,13 +176,64 @@ async def chat_handler(req: ChatRequest):
 async def get_memory():
     facts = await db.get_all_facts()
     episodes = await db.get_episodes(50)
-    return {"facts": [f.model_dump() for f in facts], "episodes": [e.model_dump() for e in episodes]}
+    files = await memory_workspace.list_files()
+    return {
+        "facts": [f.model_dump() for f in facts],
+        "episodes": [e.model_dump() for e in episodes],
+        "files": [f.model_dump(mode="json") for f in files],
+    }
 
 
 @app.post("/api/memory/search")
 async def search_memory(req: MemorySearchRequest):
     hits = await vector_memory.search(req.query, limit=req.limit, source_types=req.source_types)
     return {"hits": [hit.model_dump(mode="json") for hit in hits]}
+
+
+@app.post("/api/memory/workspace/search")
+async def search_memory_workspace(req: MemoryWorkspaceSearchRequest):
+    hits = await memory_workspace.search(
+        req.query,
+        limit=req.limit,
+        include_daily=req.include_daily,
+        include_long_term=req.include_long_term,
+    )
+    return {"hits": [hit.model_dump(mode="json") for hit in hits]}
+
+
+@app.get("/api/memory/files")
+async def list_memory_files():
+    files = await memory_workspace.list_files()
+    return {"files": [item.model_dump(mode="json") for item in files]}
+
+
+@app.get("/api/memory/files/{name}")
+async def get_memory_file(name: str):
+    try:
+        memory_file = await memory_workspace.get_file(name)
+    except FileNotFoundError:
+        raise HTTPException(404, "Memory file not found")
+    return memory_file.model_dump(mode="json")
+
+
+@app.put("/api/memory/files/{name}")
+async def update_memory_file(name: str, req: MemoryFileUpdateRequest):
+    try:
+        memory_file = await memory_workspace.write_file(name, req.content)
+    except FileNotFoundError:
+        raise HTTPException(404, "Memory file not found")
+    return memory_file.model_dump(mode="json")
+
+
+@app.post("/api/memory/notes")
+async def write_memory_notes(req: MemoryWriteRequest):
+    await memory_workspace.append_long_term_notes(req.long_term_notes)
+    await memory_workspace.append_daily_notes(req.daily_notes, req.date)
+    return {
+        "ok": True,
+        "long_term_notes_added": len(req.long_term_notes),
+        "daily_notes_added": len(req.daily_notes),
+    }
 
 
 @app.get("/api/memory/vector-status")
@@ -210,6 +274,18 @@ async def get_preferences():
 async def update_preferences(prefs: Preferences):
     await db.update_preferences(prefs)
     return {"ok": True}
+
+
+@app.get("/api/sessions")
+async def list_sessions():
+    sessions = await session_manager.list_sessions()
+    return {"sessions": [item.model_dump(mode="json") for item in sessions]}
+
+
+@app.post("/api/sessions/reset")
+async def reset_session_route(req: SessionResetRequest):
+    session = await session_manager.reset_session(req)
+    return session.model_dump(mode="json")
 
 
 # ═══════════════════════════════════════════

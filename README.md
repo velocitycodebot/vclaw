@@ -46,6 +46,8 @@ vclaw/
 │   │   └── models.py        # Pydantic data models
 │   ├── services/
 │   │   ├── agents.py        # Multi-agent orchestration engine
+│   │   ├── memory_workspace.py # Markdown memory workspace (MEMORY.md + daily notes)
+│   │   ├── session_manager.py  # Session keys, transcript files, and reset rules
 │   │   ├── shell.py         # Kernel command executor + safety filters
 │   │   ├── tools.py         # Tool registry (13 built-ins + user tools)
 │   │   └── workflows.py     # Workflow engine + background scheduler
@@ -57,10 +59,10 @@ vclaw/
 
 ## Multi-Agent System
 
-The main **Orchestrator** agent receives user messages. For complex tasks, it spawns specialized sub-agents that run in parallel as async background tasks.
+The main **AgentOS** agent receives user messages. For complex tasks, it spawns specialized sub-agents that run in parallel as async background tasks.
 
 ### Agent Hierarchy
-- **Orchestrator (main)** — routes user messages, decides to handle directly or decompose
+- **AgentOS (main)** — routes user messages, decides to handle directly or decompose
 - **Sub-agents** — spawned with role, goal, tool whitelist, iteration/timeout limits
 - **Nested agents** — any agent can spawn children, creating arbitrary-depth trees
 
@@ -89,7 +91,13 @@ AI creates persistent tools stored in a local JSON file. Handler formats: `shell
 Chain tools into scheduled pipelines. Background scheduler checks every 30s for due workflows and now supports `interval`, `daily`, and `weekly` schedules with optional timezone-aware execution.
 
 ### Persistent Memory
-Facts, episodes, preferences, tasks, tools, workflows, conversations all stored in `data/agent_os.json`.
+Preferences, tasks, tools, workflows, logs, and legacy compatibility data are stored in `data/agent_os.json`.
+
+### Session Management
+Chat state now uses disk-backed sessions with reusable `session_key` routing, JSONL transcripts in `data/sessions/`, manual reset support, and automatic rotation after inactivity or the default 4:00 AM local reset boundary.
+
+### Markdown Memory Workspace
+Durable assistant memory now lives in `data/memory/MEMORY.md` and daily notes like `data/memory/2026-03-04.md`. The agent can search, read, and append to those files via dedicated memory tools and APIs.
 
 ### Task Orchestration
 Tasks now carry progress, blockers, assignee, parent/dependency links, due dates, review cadence, and outcome fields so the assistant can keep work state over time and revisit it automatically.
@@ -98,7 +106,7 @@ Tasks now carry progress, blockers, assignee, parent/dependency links, due dates
 The backend ranks relevant tasks, facts, workflows, and episodes per request and compresses older conversation history before sending context to Claude, reducing topic overload.
 
 ### Semantic Recall
-The backend now maintains a vector-style memory index over preferences, facts, tasks, workflows, episodes, and conversation history, then uses semantic retrieval to surface relevant past context before each Claude call.
+The backend now maintains a vector-style memory index over preferences, facts, tasks, workflows, episodes, markdown memory files, and session transcripts, then uses semantic retrieval to surface relevant past context before each Claude call.
 
 ### Controlled Self-Editing
 Source edits can now run through a guarded pipeline that snapshots touched files, applies writes, runs optional eval/test commands, records a session, and rolls changes back automatically on failure.
@@ -121,6 +129,8 @@ The main orchestrator now has a background supervisor that resumes waiting paren
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | /api/chat | Agentic chat loop |
+| GET | /api/sessions | List active chat sessions |
+| POST | /api/sessions/reset | Start a fresh session for an existing session id/key |
 | POST | /api/shell/execute | Run kernel command |
 | GET | /api/shell/history | Command history |
 | GET/POST/DELETE | /api/tools | Tool CRUD |
@@ -131,6 +141,10 @@ The main orchestrator now has a background supervisor that resumes waiting paren
 | GET/POST/DELETE | /api/memory/facts | Facts CRUD |
 | GET | /api/memory/episodes | Episode history |
 | POST | /api/memory/search | Semantic memory search |
+| POST | /api/memory/workspace/search | Search markdown memory workspace |
+| GET | /api/memory/files | List markdown memory files |
+| GET | /api/memory/files/:name | Read a markdown memory file |
+| POST | /api/memory/notes | Append to MEMORY.md and/or daily note |
 | GET | /api/memory/vector-status | Vector index status |
 | GET/PUT | /api/preferences | User preferences |
 | GET/POST/PUT/DELETE | /api/tasks | Task CRUD |

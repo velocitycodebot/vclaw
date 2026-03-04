@@ -95,7 +95,9 @@ def _tool_schema(tool: ToolDef) -> dict[str, Any]:
     description = tool.description
     if tool.builtin:
         description = f"{description} Use this only when it advances the user's task."
-    return _cacheable({
+    # Anthropic allows only a small number of cache_control blocks per request.
+    # Keep caching on system prompt blocks, not on every tool schema.
+    return {
         "name": tool.name,
         "description": description,
         "input_schema": {
@@ -104,7 +106,7 @@ def _tool_schema(tool: ToolDef) -> dict[str, Any]:
             "required": required,
             "additionalProperties": False,
         },
-    })
+    }
 
 
 def _control_tools(allow_agent_complete: bool) -> list[dict[str, Any]]:
@@ -181,13 +183,24 @@ def _control_tools(allow_agent_complete: bool) -> list[dict[str, Any]]:
         },
         {
             "name": CONTROL_TOOL_MEMORY,
-            "description": "Store durable facts or update remembered user preferences.",
+            "description": "Persist durable markdown memory notes and/or update remembered user preferences.",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "facts": {
                         "type": "array",
                         "items": {"type": "string"},
+                        "description": "Legacy durable facts. These are also written to long-term markdown memory.",
+                    },
+                    "long_term_notes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Durable notes for MEMORY.md.",
+                    },
+                    "daily_notes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Daily/session notes for today's markdown note.",
                     },
                     "preferences": {
                         "type": "object",
@@ -272,7 +285,7 @@ def _control_tools(allow_agent_complete: bool) -> list[dict[str, Any]]:
                 "additionalProperties": False,
             },
         })
-    return [_cacheable(tool) for tool in tools]
+    return tools
 
 
 def _message_content(message: ChatMessage) -> str | list[dict[str, Any]]:
@@ -528,6 +541,7 @@ Never invent tool results. After tool results arrive, continue from them and ans
 The user profile describes the human user, not you. Keep the assistant identity separate from the human user.
 If the user explicitly assigns you a working name, company, or role, you may adopt that as your assistant persona or virtual employee identity.
 When a persona is active, answer in character naturally, but do not keep re-stating the persona during normal tool use.
+Treat markdown memory files as the durable memory source of truth. Use `memory_search` and `memory_get` to recall prior notes, and use `memory_write` or the memory control tool to persist notes.
 Keep routine tool use low-friction: do not narrate tool syntax or justify simple system checks with persona filler."""
 
     runtime_context = "\n".join([
@@ -594,6 +608,7 @@ def build_agent_system_prompt(
         "Keep responses concise and operational. When there is nothing left to do, answer clearly.",
         "The user profile belongs to the human user. Do not present yourself as the human user.",
         "If the user explicitly assigns you a working persona, role, company, or virtual employee identity, adopt it as the assistant's persona rather than the human user's identity.",
+        "Markdown memory files are the durable memory source of truth. Use memory_search and memory_get to recall notes, and memory_write or the memory control tool to persist long-term and daily notes.",
         "Do not narrate routine tool usage or explain simple system checks with role-based filler.",
         "If the user asks who you are, answer with the active assistant persona if one has been assigned; otherwise answer simply as AgentOS or the AI assistant in this app.",
         "Do not mention internal agent names, IDs, or orchestration mechanics unless the user asks for implementation details.",

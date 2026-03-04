@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import time
@@ -9,9 +11,24 @@ from app.schemas.models import ToolDef, ToolParam, ToolResult, new_id
 from app.services.shell import execute_command
 from app.schemas.models import SelfEditRunRequest, SelfEditWrite
 from app.services.self_edit import self_edit_service
+from app.services.memory_workspace import memory_workspace
 from app.services.vector_memory import vector_memory
 
 from typing import Optional
+
+
+def _parse_json_string_list(raw: object) -> list[str] | str:
+    if raw is None or raw == "":
+        return []
+    if not isinstance(raw, str):
+        return "Expected a JSON string array"
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return f"Invalid JSON array: {exc}"
+    if not isinstance(parsed, list):
+        return "Expected a JSON array"
+    return [str(item).strip() for item in parsed if str(item).strip()]
 
 
 class ToolRegistry:
@@ -100,11 +117,25 @@ class ToolRegistry:
              [ToolParam(name="name", type="string", description="Variable name")],
              "_builtin_get_env"),
             ("network_info", "Get network interfaces and connections.", [], "_builtin_network_info"),
-            ("semantic_memory_search", "Search persistent memory semantically across preferences, tasks, facts, episodes, workflows, and conversations.",
+            ("semantic_memory_search", "Search persistent memory semantically across preferences, tasks, facts, episodes, workflows, markdown memory files, and session transcripts.",
              [ToolParam(name="query", type="string", description="What to recall"),
               ToolParam(name="limit", type="integer", description="Max results", required=False),
               ToolParam(name="source_types_json", type="string", description="Optional JSON array of source types", required=False)],
              "_builtin_semantic_memory_search"),
+            ("memory_search", "Search disk-backed markdown memory files such as MEMORY.md and daily notes.",
+             [ToolParam(name="query", type="string", description="What to search for"),
+              ToolParam(name="limit", type="integer", description="Max results", required=False),
+              ToolParam(name="include_daily", type="boolean", description="Include YYYY-MM-DD.md files", required=False),
+              ToolParam(name="include_long_term", type="boolean", description="Include MEMORY.md", required=False)],
+             "_builtin_memory_search"),
+            ("memory_get", "Read a specific markdown memory file such as MEMORY.md or a daily note.",
+             [ToolParam(name="name", type="string", description="File name, e.g. MEMORY.md or 2026-03-04.md")],
+             "_builtin_memory_get"),
+            ("memory_write", "Append notes to long-term memory and/or today's daily memory note.",
+             [ToolParam(name="long_term_notes_json", type="string", description="JSON array of durable notes", required=False),
+              ToolParam(name="daily_notes_json", type="string", description="JSON array of daily/session notes", required=False),
+              ToolParam(name="date", type="string", description="Optional YYYY-MM-DD override for daily note", required=False)],
+             "_builtin_memory_write"),
             ("self_edit_pipeline", "Apply controlled code edits with snapshot, optional evaluation, optional tests, and automatic rollback on failure.",
              [ToolParam(name="workspace", type="string", description="Workspace root to edit", required=False),
               ToolParam(name="writes_json", type="string", description="JSON array of {path, content} objects"),
@@ -272,6 +303,42 @@ async def _execute_builtin(name: str, params: dict) -> ToolResult:
             source_types=source_types,
         )
         return ToolResult(success=True, result=[hit.model_dump(mode="json") for hit in hits])
+
+    elif name == "memory_search":
+        query = params.get("query", "")
+        if not query:
+            return ToolResult(success=False, error="No query provided")
+        hits = await memory_workspace.search(
+            query,
+            limit=int(params.get("limit", 8) or 8),
+            include_daily=bool(params.get("include_daily", True)),
+            include_long_term=bool(params.get("include_long_term", True)),
+        )
+        return ToolResult(success=True, result=[hit.model_dump(mode="json") for hit in hits])
+
+    elif name == "memory_get":
+        name_val = params.get("name", "")
+        if not name_val:
+            return ToolResult(success=False, error="No name provided")
+        try:
+            memory_file = await memory_workspace.get_file(name_val)
+        except FileNotFoundError:
+            return ToolResult(success=False, error=f"Memory file '{name_val}' not found")
+        return ToolResult(success=True, result=memory_file.model_dump(mode="json"))
+
+    elif name == "memory_write":
+        long_term_notes = _parse_json_string_list(params.get("long_term_notes_json"))
+        if isinstance(long_term_notes, str):
+            return ToolResult(success=False, error=long_term_notes)
+        daily_notes = _parse_json_string_list(params.get("daily_notes_json"))
+        if isinstance(daily_notes, str):
+            return ToolResult(success=False, error=daily_notes)
+        await memory_workspace.append_long_term_notes(long_term_notes)
+        await memory_workspace.append_daily_notes(daily_notes, params.get("date"))
+        return ToolResult(success=True, result={
+            "long_term_notes_added": len(long_term_notes),
+            "daily_notes_added": len(daily_notes),
+        })
 
     elif name == "self_edit_pipeline":
         writes_json = params.get("writes_json", "")

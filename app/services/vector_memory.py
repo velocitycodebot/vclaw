@@ -197,13 +197,16 @@ class VectorMemoryService:
 
     async def _load_documents(self) -> list[_MemoryDocument]:
         import app.storage.database as db
+        from app.services.memory_workspace import memory_workspace
+        from app.services.session_manager import session_manager
 
         prefs = await db.get_preferences()
         facts = await db.get_all_facts()
         episodes = await db.get_episodes(100)
         tasks = await db.get_all_tasks()
         workflows = await db.get_all_workflows()
-        conversations = await db.get_all_conversations()
+        memory_docs = await memory_workspace.memory_documents()
+        sessions = await session_manager.list_sessions()
 
         docs: list[_MemoryDocument] = []
         docs.extend(self._preference_documents(prefs))
@@ -247,16 +250,26 @@ class VectorMemoryService:
             )
             for workflow in workflows
         )
-        for cid, messages in conversations.items():
+        docs.extend(
+            _MemoryDocument(
+                source_type=item["source_type"],
+                source_id=item["source_id"],
+                text=item["text"],
+                metadata=item["metadata"],
+            )
+            for item in memory_docs
+        )
+        for session in sessions:
+            messages = await session_manager.load_messages(session.id)
             for index, message in enumerate(messages[-40:]):
                 if not message.content.strip():
                     continue
                 docs.append(
                     _MemoryDocument(
-                        source_type="conversation",
-                        source_id=f"{cid}:{index}",
-                        text=f"Conversation {cid} {message.role}: {message.content[:1500]}",
-                        metadata={"conversation_id": cid, "role": message.role},
+                        source_type="session",
+                        source_id=f"{session.id}:{index}",
+                        text=f"Session {session.session_key} {message.role}: {message.content[:1500]}",
+                        metadata={"session_id": session.id, "session_key": session.session_key, "role": message.role},
                     )
                 )
         return docs

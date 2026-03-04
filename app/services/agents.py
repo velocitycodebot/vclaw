@@ -10,6 +10,7 @@ from app.schemas.models import (
 import app.clients.claude as claude_client
 import app.storage.database as db
 from app.services.context import build_context_bundle
+from app.services.memory_workspace import memory_workspace
 
 
 class AgentRegistry:
@@ -167,6 +168,25 @@ async def _apply_preference_updates(updates: dict[str, Any]) -> dict[str, Any]:
     merged.custom = custom
     await db.update_preferences(merged)
     return merged.model_dump(mode="json")
+
+
+async def _apply_memory_update(memory_update: claude_client.AIMemoryUpdate, step: AgentStepResult):
+    durable_notes = list(memory_update.facts or [])
+    durable_notes.extend(note for note in (memory_update.long_term_notes or []) if note not in durable_notes)
+    daily_notes = list(memory_update.daily_notes or [])
+
+    if durable_notes:
+        await memory_workspace.append_long_term_notes(durable_notes)
+        for fact_text in durable_notes:
+            await db.add_fact(fact_text)
+            step.memory_facts_added.append(fact_text)
+
+    if daily_notes:
+        await memory_workspace.append_daily_notes(daily_notes)
+        step.memory_facts_added.extend(daily_notes)
+
+    if memory_update.preferences:
+        step.preferences_updated = await _apply_preference_updates(memory_update.preferences)
 
 
 async def _apply_task_operation(operation: AITaskOperation, agent_id: str) -> Any:
@@ -365,12 +385,7 @@ async def _execute_agent_step_inner(
 
                 elif tool_name == claude_client.CONTROL_TOOL_MEMORY:
                     memory_update = claude_client.AIMemoryUpdate(**tool_input)
-                    if memory_update.facts:
-                        for fact_text in memory_update.facts:
-                            await db.add_fact(fact_text)
-                            step.memory_facts_added.append(fact_text)
-                    if memory_update.preferences:
-                        step.preferences_updated = await _apply_preference_updates(memory_update.preferences)
+                    await _apply_memory_update(memory_update, step)
                     payload = {
                         "ok": True,
                         "facts_added": len(step.memory_facts_added),
@@ -574,12 +589,7 @@ async def _execute_agent_step_inner(
 
     # ── Handle memory updates ──
     if parsed.memory_update:
-        if parsed.memory_update.facts:
-            for fact_text in parsed.memory_update.facts:
-                await db.add_fact(fact_text)
-                step.memory_facts_added.append(fact_text)
-        if parsed.memory_update.preferences:
-            step.preferences_updated = await _apply_preference_updates(parsed.memory_update.preferences)
+        await _apply_memory_update(parsed.memory_update, step)
 
     # Update agent messages with final response
     if not step.status_change and not parsed.tool_calls:
@@ -707,8 +717,4 @@ async def run_agent_loop(
 
         return "Agent loop ended"
     finally:
-        if agent_id == registry.main_agent_id:
-            main_agent = registry.get_agent(agent_id)
-            if main_agent:
-                await db.save_conversation("main_conv", main_agent.messages)
         registry.finish_loop(agent_id)

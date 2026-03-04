@@ -254,12 +254,100 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     conversation_id: Optional[str] = None
+    session_id: Optional[str] = None
+    session_key: Optional[str] = None
+    new_session: bool = False
+    reset_session: bool = False
+    dm_scope: Optional[str] = None
+    peer_id: Optional[str] = None
+    channel_id: Optional[str] = None
+    account_id: Optional[str] = None
+    main_key: Optional[str] = None
+    idle_minutes: Optional[int] = None
 
 
 class MemorySearchRequest(BaseModel):
     query: str
     limit: int = 8
     source_types: Optional[list[str]] = None
+
+
+class SessionScope(str, Enum):
+    MAIN = "main"
+    PER_PEER = "per-peer"
+    PER_CHANNEL_PEER = "per-channel-peer"
+    PER_ACCOUNT_CHANNEL_PEER = "per-account-channel-peer"
+
+
+class SessionRecord(BaseModel):
+    id: str = ""
+    agent_id: str = "main"
+    session_key: str
+    dm_scope: SessionScope = SessionScope.MAIN
+    main_key: str = "main"
+    peer_id: Optional[str] = None
+    channel_id: Optional[str] = None
+    account_id: Optional[str] = None
+    idle_minutes: Optional[int] = None
+    transcript_path: str = ""
+    message_count: int = 0
+    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_activity_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    reset_reason: Optional[str] = None
+    previous_session_id: Optional[str] = None
+    archived_at: Optional[datetime] = None
+
+
+class SessionResetRequest(BaseModel):
+    session_id: Optional[str] = None
+    session_key: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class MemoryFileInfo(BaseModel):
+    name: str
+    kind: str
+    path: str
+    size: int = 0
+    updated_at: Optional[datetime] = None
+
+
+class MemoryFileContent(BaseModel):
+    name: str
+    kind: str
+    path: str
+    content: str
+    updated_at: Optional[datetime] = None
+
+
+class MemoryWorkspaceSearchRequest(BaseModel):
+    query: str
+    limit: int = 8
+    include_daily: bool = True
+    include_long_term: bool = True
+
+
+class MemoryWorkspaceSearchHit(BaseModel):
+    file_name: str
+    path: str
+    kind: str
+    title: str
+    snippet: str
+    score: float = 0.0
+    line_start: int = 1
+    line_end: int = 1
+    updated_at: Optional[datetime] = None
+
+
+class MemoryWriteRequest(BaseModel):
+    long_term_notes: list[str] = Field(default_factory=list)
+    daily_notes: list[str] = Field(default_factory=list)
+    date: Optional[str] = None
+
+
+class MemoryFileUpdateRequest(BaseModel):
+    content: str
 
 
 # ── Agents ──
@@ -357,6 +445,8 @@ class AIWorkflowDefine(BaseModel):
 
 class AIMemoryUpdate(BaseModel):
     facts: Optional[list[str]] = None
+    long_term_notes: Optional[list[str]] = None
+    daily_notes: Optional[list[str]] = None
     preferences: Optional[dict[str, Any]] = None
 
 
