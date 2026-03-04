@@ -30,7 +30,7 @@ from app.schemas.models import (
 
 API_URL = "https://api.anthropic.com/v1/messages"
 API_VERSION = "2023-06-01"
-DEFAULT_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929")
+DEFAULT_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 DEFAULT_MAX_TOKENS = int(os.environ.get("ANTHROPIC_MAX_TOKENS", "4096"))
 PROMPT_CACHING_ENABLED = os.environ.get("ANTHROPIC_PROMPT_CACHING", "1") not in {"0", "false", "False"}
 THINKING_ENABLED = os.environ.get("ANTHROPIC_ENABLE_THINKING", "0") in {"1", "true", "True"}

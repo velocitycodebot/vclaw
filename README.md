@@ -22,12 +22,14 @@ uv run vclaw start
 
 `vclaw onboard`
 - Prompts for the Anthropic API key and startup host/port
+- Prompts for the Anthropic model and saves `claude-sonnet-4-6` by default
 - Saves the config locally in `data/runtime_config.json`
 - Starts the service immediately after onboarding finishes
 
 `vclaw start`
 - Validates that the required startup config is present
 - Loads the saved API key into the process environment
+- Loads the saved Anthropic model into the process environment
 - Starts the FastAPI service with the saved host/port
 
 ## Architecture
@@ -96,7 +98,8 @@ Single user message can trigger multiple tool executions across multiple iterati
 - Native Claude Messages API tool use for built-in tools, custom tools, workflows, memory updates, and agent coordination
 - Prompt caching on stable system/tool definitions to reduce repeated prompt cost
 - Optional extended thinking via `ANTHROPIC_ENABLE_THINKING=1`
-- Configurable model and service tier via `ANTHROPIC_MODEL`, `ANTHROPIC_MAX_TOKENS`, and `ANTHROPIC_SERVICE_TIER`
+- Default model is `claude-sonnet-4-6`, with `claude-opus-4-6` available via saved config, CLI flags, or `ANTHROPIC_MODEL`
+- Configurable token budget and service tier via `ANTHROPIC_MAX_TOKENS` and `ANTHROPIC_SERVICE_TIER`
 
 ## API Endpoints
 

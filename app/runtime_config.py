@@ -1,13 +1,18 @@
 import json
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, ValidationError
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 CONFIG_PATH = DATA_DIR / "runtime_config.json"
+SUPPORTED_ANTHROPIC_MODELS = (
+    "claude-sonnet-4-6",
+    "claude-opus-4-6",
+)
+DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
 
 class RuntimeConfigError(Exception):
@@ -16,6 +21,7 @@ class RuntimeConfigError(Exception):
 
 class RuntimeConfig(BaseModel):
     anthropic_api_key: str = Field(min_length=1)
+    anthropic_model: Literal["claude-sonnet-4-6", "claude-opus-4-6"] = DEFAULT_ANTHROPIC_MODEL
     host: str = "0.0.0.0"
     port: int = Field(default=3000, ge=1, le=65535)
 
@@ -56,6 +62,7 @@ def save_runtime_config(config: RuntimeConfig) -> None:
 
 def resolve_runtime_config(
     api_key: Optional[str] = None,
+    model: Optional[str] = None,
     host: Optional[str] = None,
     port: Optional[int] = None,
 ) -> RuntimeConfig:
@@ -65,12 +72,19 @@ def resolve_runtime_config(
     if not resolved_api_key and saved is not None:
         resolved_api_key = saved.anthropic_api_key
 
+    resolved_model = model or os.environ.get("ANTHROPIC_MODEL", "")
+    if not resolved_model and saved is not None:
+        resolved_model = saved.anthropic_model
+    if not resolved_model:
+        resolved_model = DEFAULT_ANTHROPIC_MODEL
+
     resolved_host = host if host is not None else (saved.host if saved is not None else "0.0.0.0")
     resolved_port = port if port is not None else (saved.port if saved is not None else 3000)
 
     try:
         return RuntimeConfig(
             anthropic_api_key=resolved_api_key,
+            anthropic_model=resolved_model,
             host=resolved_host,
             port=resolved_port,
         )
