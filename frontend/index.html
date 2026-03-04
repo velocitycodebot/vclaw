@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AgentOS</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.25.6/babel.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--bg0:#0b0b0f;--bg1:#111116;--bg2:#18181f;--bg3:#222230;--brd:#27273a;--brd2:#363650;--fg0:#eeeef2;--fg1:#b0b0c8;--fg2:#7c7c9a;--fg3:#4e4e68;--accent:#7c5cfc;--accent2:#9478ff;--green:#2ea043;--red:#e5484d;--amber:#f0a020;--blue:#4d7bf7;--cyan:#22c5db;--pink:#e879a8;--sans:'DM Sans',system-ui,sans-serif;--mono:'JetBrains Mono',monospace}
+*{box-sizing:border-box;margin:0;padding:0}
+body{height:100vh;display:flex;flex-direction:column;background:var(--bg0);color:var(--fg1);font-family:var(--sans);overflow:hidden}
+::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:var(--brd);border-radius:8px}
+@keyframes fadeUp{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+@keyframes pulse{0%,100%{opacity:.3}50%{opacity:1}}
+@keyframes glow{0%,100%{box-shadow:0 0 4px rgba(124,92,252,.25)}50%{box-shadow:0 0 12px rgba(124,92,252,.5)}}
+#root{display:flex;flex-direction:column;height:100vh}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ═══════════════════════════════════════════
+// API HELPER
+// ═══════════════════════════════════════════
+const api = async (path, opts = {}) => {
+  try {
+    const res = await fetch(path, { headers: { 'Content-Type': 'application/json', ...opts.headers }, ...opts });
+    return await res.json();
+  } catch (e) { console.error(e); return null; }
+};
+
+const esc = s => { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; };
+
+// ═══════════════════════════════════════════
+// STYLES (inline objects)
+// ═══════════════════════════════════════════
+const S = {
+  header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 16px', height: 48, borderBottom: '1px solid var(--brd)', background: 'var(--bg1)', flexShrink: 0 },
+  logo: { display: 'flex', alignItems: 'center', gap: 10 },
+  logoIcon: { width: 28, height: 28, borderRadius: 7, background: 'linear-gradient(135deg,var(--accent),#b08cff)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13 },
+  tabs: { display: 'flex', gap: 1 },
+  tab: (active) => ({ display: 'flex', alignItems: 'center', gap: 5, padding: '5px 11px', borderRadius: 6, background: active ? 'var(--bg3)' : 'transparent', color: active ? 'var(--fg0)' : 'var(--fg3)', border: 'none', cursor: 'pointer', fontSize: 11, fontWeight: 500, fontFamily: 'inherit', transition: '.15s', position: 'relative' }),
+  badge: (color) => ({ display: 'inline-block', padding: '2px 8px', borderRadius: 4, fontSize: 10, fontWeight: 600, letterSpacing: '.5px', fontFamily: 'var(--mono)', background: `${color}18`, color }),
+  btn: { display: 'inline-flex', alignItems: 'center', gap: 6, padding: '7px 14px', borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: 'pointer', border: 'none', fontFamily: 'inherit', transition: '.15s' },
+  primary: { background: 'var(--accent)', color: '#fff' },
+  ghost: { background: 'transparent', border: '1px solid var(--brd)', color: 'var(--fg2)' },
+  danger: { background: 'rgba(229,72,77,.08)', border: '1px solid rgba(229,72,77,.2)', color: 'var(--red)' },
+  cyanBtn: { background: 'rgba(34,197,219,.08)', border: '1px solid rgba(34,197,219,.2)', color: 'var(--cyan)' },
+  card: { background: 'var(--bg2)', border: '1px solid var(--brd)', borderRadius: 8, padding: '12px 14px', marginBottom: 6, transition: 'border-color .15s', animation: 'fadeUp .2s ease' },
+  panel: { flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column' },
+  sectionTitle: { fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 },
+  input: { width: '100%', background: 'var(--bg2)', border: '1px solid var(--brd)', borderRadius: 6, padding: '8px 10px', color: 'var(--fg0)', fontSize: 12, outline: 'none', fontFamily: 'var(--sans)' },
+  monoInput: { width: '100%', background: 'var(--bg2)', border: '1px solid var(--brd)', borderRadius: 6, padding: '8px 10px', color: 'var(--fg0)', fontSize: 11, outline: 'none', fontFamily: 'var(--mono)', resize: 'vertical' },
+  stat: { background: 'var(--bg1)', border: '1px solid var(--brd)', borderRadius: 6, padding: '8px 12px', flex: 1 },
+  dot: (status) => {
+    const colors = { running: 'var(--green)', idle: 'var(--fg3)', completed: 'var(--blue)', failed: 'var(--red)', terminated: 'var(--fg3)', waiting_for_subagent: 'var(--amber)', waiting_for_input: 'var(--cyan)' };
+    const animated = ['running', 'waiting_for_subagent', 'waiting_for_input'].includes(status);
+    return { width: 7, height: 7, borderRadius: '50%', background: colors[status] || 'var(--fg3)', flexShrink: 0, animation: animated ? 'pulse 1s infinite' : 'none' };
+  },
+  statusColor: (s) => ({ running: 'var(--green)', idle: 'var(--fg3)', completed: 'var(--blue)', failed: 'var(--red)', terminated: 'var(--fg3)', waiting_for_subagent: 'var(--amber)', waiting_for_input: 'var(--cyan)' }[s] || 'var(--fg3)'),
+};
+
+// ═══════════════════════════════════════════
+// CHAT PANEL
+// ═══════════════════════════════════════════
+function ChatPanel() {
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState('');
+  const [sending, setSending] = useState(false);
+  const [convId, setConvId] = useState(null);
+  const bottomRef = useRef(null);
+
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
+
+  const send = async () => {
+    const text = input.trim();
+    if (!text || sending) return;
+    setInput('');
+    setMessages(prev => [...prev, { role: 'user', content: text, time: new Date() }]);
+    setSending(true);
+    try {
+      const data = await api('/api/chat', { method: 'POST', body: JSON.stringify({ message: text, conversation_id: convId }) });
+      if (data) {
+        setConvId(data.conversation_id);
+        const newMsgs = [];
+        if (data.tool_calls?.length) data.tool_calls.forEach(tc => newMsgs.push({ role: 'system', content: `🔧 ${tc.tool} → ${tc.result?.success ? '✓' : '✗'}`, time: new Date() }));
+        if (data.agents_spawned?.length) data.agents_spawned.forEach(a => newMsgs.push({ role: 'spawn', content: `🤖 Spawned: ${a.name} — ${a.role}`, time: new Date() }));
+        newMsgs.push({ role: 'assistant', content: data.message || 'No response', time: new Date() });
+        setMessages(prev => [...prev, ...newMsgs]);
+      }
+    } catch (e) { setMessages(prev => [...prev, { role: 'assistant', content: 'Error: ' + e.message, time: new Date() }]); }
+    setSending(false);
+  };
+
+  const suggestions = [
+    'Show me system info', 'Research AI safety — spawn 2 sub-agents',
+    'Create a tool that monitors disk usage', 'Write and compile a hello world in C'
+  ];
+
+  if (!messages.length) return (
+    <div style={S.panel}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ fontSize: 40 }}>⚡</div>
+        <h2 style={{ fontSize: 18, fontWeight: 300, color: 'var(--fg0)', margin: '12px 0 6px' }}>AgentOS — Multi-Agent Orchestrator</h2>
+        <p style={{ fontSize: 12, color: 'var(--fg3)', maxWidth: 500, textAlign: 'center', lineHeight: 1.6 }}>Self-improving AI with kernel access, sub-agent spawning, tool creation, workflow automation.</p>
+        <div style={{ display: 'flex', gap: 6, marginTop: 18, flexWrap: 'wrap', justifyContent: 'center' }}>
+          {suggestions.map(s => <button key={s} onClick={() => setInput(s)} style={{ padding: '6px 14px', borderRadius: 20, background: 'var(--bg2)', color: 'var(--fg2)', border: '1px solid var(--brd)', cursor: 'pointer', fontSize: 11, fontFamily: 'inherit' }}>{s}</button>)}
+        </div>
+      </div>
+      <ChatInput input={input} setInput={setInput} send={send} onNew={() => { setMessages([]); setConvId(null); }} sending={sending} />
+    </div>
+  );
+
+  const msgStyle = (role) => {
+    if (role === 'user') return { display: 'flex', justifyContent: 'flex-end', marginBottom: 10, animation: 'fadeUp .2s ease' };
+    return { display: 'flex', marginBottom: 10, animation: 'fadeUp .2s ease' };
+  };
+  const bubbleStyle = (role) => {
+    const base = { maxWidth: '78%', padding: '10px 14px', fontSize: 13, lineHeight: 1.55, wordBreak: 'break-word', whiteSpace: 'pre-wrap' };
+    if (role === 'user') return { ...base, borderRadius: '14px 14px 3px 14px', background: 'var(--accent)', color: '#fff' };
+    if (role === 'system') return { ...base, background: 'var(--bg2)', borderLeft: '3px solid var(--amber)', fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--fg2)', borderRadius: 6 };
+    if (role === 'spawn') return { ...base, background: 'rgba(34,197,219,.06)', borderLeft: '3px solid var(--cyan)', fontSize: 11, borderRadius: 6, color: 'var(--cyan)' };
+    return { ...base, borderRadius: '14px 14px 14px 3px', background: 'var(--bg2)', border: '1px solid var(--brd)' };
+  };
+
+  return (
+    <div style={S.panel}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '16px 16px 8px' }}>
+        {messages.map((m, i) => <div key={i} style={msgStyle(m.role)}><div style={bubbleStyle(m.role)}>{m.content}<div style={{ fontSize: 9, opacity: .35, marginTop: 4, textAlign: 'right', fontFamily: 'var(--mono)' }}>{m.time?.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div></div></div>)}
+        {sending && <div style={{ display: 'flex', gap: 5, padding: 12, alignItems: 'center' }}><div style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--accent)', animation: 'pulse 1s 0s infinite' }} /><div style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--accent)', animation: 'pulse 1s .15s infinite' }} /><div style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--accent)', animation: 'pulse 1s .3s infinite' }} /><span style={{ fontSize: 11, color: 'var(--fg3)', marginLeft: 6, fontFamily: 'var(--mono)' }}>orchestrating…</span></div>}
+        <div ref={bottomRef} />
+      </div>
+      <ChatInput input={input} setInput={setInput} send={send} onNew={() => { setMessages([]); setConvId(null); }} sending={sending} />
+    </div>
+  );
+}
+
+function ChatInput({ input, setInput, send, onNew, sending }) {
+  return (
+    <div style={{ padding: '10px 16px 14px', borderTop: '1px solid var(--brd)', background: 'var(--bg1)', display: 'flex', gap: 8 }}>
+      <button onClick={onNew} style={{ ...S.btn, width: 38, height: 38, padding: 0, background: 'var(--bg2)', border: '1px solid var(--brd)', color: 'var(--fg3)', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>＋</button>
+      <div style={{ flex: 1, display: 'flex', background: 'var(--bg2)', borderRadius: 10, border: '1px solid var(--brd)', padding: '0 4px 0 14px', alignItems: 'center' }}>
+        <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} placeholder="Ask anything, spawn agents, run commands…" style={{ flex: 1, background: 'none', border: 'none', color: 'var(--fg0)', fontSize: 13, padding: '10px 0', outline: 'none', fontFamily: 'inherit' }} disabled={sending} />
+        <button onClick={send} style={{ ...S.btn, ...S.primary, padding: '6px 12px', borderRadius: 7, fontSize: 11 }} disabled={sending}>▶</button>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════
+// AGENTS PANEL
+// ═══════════════════════════════════════════
+function AgentsPanel() {
+  const [tree, setTree] = useState(null);
+  const [selected, setSelected] = useState(null);
+  const [detail, setDetail] = useState(null);
+  const [ipcMsgs, setIpcMsgs] = useState([]);
+  const [showSpawn, setShowSpawn] = useState(false);
+  const [spawnForm, setSpawnForm] = useState({ name: '', role: '', goal: '', iters: 20, timeout: 300, tools: '', parent: 'main' });
+  const [agentInput, setAgentInput] = useState('');
+
+  const load = useCallback(async () => {
+    const t = await api('/api/agents/tree');
+    if (t) setTree(t);
+    if (selected) {
+      const d = await api(`/api/agents/${selected}`);
+      if (d && !d.error) setDetail(d);
+      const m = await api(`/api/agents/${selected}/messages`);
+      if (m?.messages) setIpcMsgs(m.messages);
+    }
+  }, [selected]);
+
+  useEffect(() => { load(); const iv = setInterval(load, 3000); return () => clearInterval(iv); }, [load]);
+
+  const doSpawn = async () => {
+    if (!spawnForm.name || !spawnForm.goal) return;
+    const tools = spawnForm.tools.split(',').map(s => s.trim()).filter(Boolean);
+    const data = await api('/api/agents/spawn', { method: 'POST', body: JSON.stringify({ name: spawnForm.name, role: spawnForm.role || spawnForm.name, goal: spawnForm.goal, tools: tools.length ? tools : null, initial_task: spawnForm.goal, max_iterations: parseInt(spawnForm.iters) || 20, timeout_secs: parseInt(spawnForm.timeout) || 300, parent_id: spawnForm.parent || 'main' }) });
+    if (data?.id) { setShowSpawn(false); setSelected(data.id); load(); }
+  };
+
+  const terminate = async (id) => { if (confirm('Terminate?')) { await api(`/api/agents/${id}/terminate`, { method: 'POST' }); load(); } };
+  const sendMsg = async () => { if (!agentInput.trim() || !selected) return; await api(`/api/agents/${selected}/message`, { method: 'POST', body: JSON.stringify({ content: agentInput, msg_type: 'directive' }) }); setAgentInput(''); setTimeout(load, 500); };
+
+  const renderNode = (n) => {
+    if (!n) return null;
+    const isSel = selected === n.id;
+    return (
+      <div key={n.id} style={{ marginBottom: 4 }}>
+        <div onClick={() => setSelected(n.id)} style={{ padding: '8px 10px', borderRadius: 6, cursor: 'pointer', border: isSel ? '1px solid rgba(124,92,252,.3)' : '1px solid transparent', background: isSel ? 'rgba(124,92,252,.06)' : 'transparent', transition: '.15s' }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--fg0)' }}>{n.name}</div>
+          <div style={{ fontSize: 10, color: 'var(--fg2)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{(n.role || '').slice(0, 55)}</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 3 }}>
+            <div style={S.dot(n.status)} />
+            <span style={{ fontSize: 10, color: S.statusColor(n.status), fontFamily: 'var(--mono)' }}>{n.status}</span>
+            <span style={{ fontSize: 9, color: 'var(--fg3)', fontFamily: 'var(--mono)', marginLeft: 'auto' }}>i:{n.iterations || 0}</span>
+          </div>
+          {n.result && <div style={{ fontSize: 10, color: 'var(--fg2)', marginTop: 3, maxHeight: 24, overflow: 'hidden' }}>{n.result.slice(0, 70)}</div>}
+        </div>
+        {n.children?.length > 0 && <div style={{ marginLeft: 16, paddingLeft: 10, borderLeft: '1px dashed var(--brd)' }}>{n.children.map(c => renderNode(c))}</div>}
+      </div>
+    );
+  };
+
+  return (
+    <div style={{ ...S.panel, padding: 0, flexDirection: 'row' }}>
+      {/* Sidebar */}
+      <div style={{ width: 300, borderRight: '1px solid var(--brd)', overflowY: 'auto', padding: 12, flexShrink: 0 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <h3 style={{ ...S.sectionTitle, margin: 0, color: 'var(--cyan)' }}>Agent Swarm</h3>
+          <button onClick={() => setShowSpawn(!showSpawn)} style={{ ...S.btn, ...S.cyanBtn, padding: '4px 10px', fontSize: 11 }}>+ Spawn</button>
+        </div>
+        {showSpawn && (
+          <div style={{ background: 'var(--bg1)', border: '1px solid var(--brd)', borderRadius: 8, padding: 12, marginBottom: 10 }}>
+            <h3 style={{ fontSize: 12, fontWeight: 600, color: 'var(--fg0)', marginBottom: 10 }}>🤖 Spawn Agent</h3>
+            {[['Name', 'name', 'Research Agent'], ['Role', 'role', 'Specialist in…'], ['Goal / Task', 'goal', 'Find latest developments…']].map(([l, k, p]) => (
+              <div key={k} style={{ marginBottom: 8 }}><label style={{ fontSize: 9, color: 'var(--fg3)', fontWeight: 600, display: 'block', marginBottom: 3, textTransform: 'uppercase', letterSpacing: '.5px' }}>{l}</label>
+                {k === 'goal' ? <textarea value={spawnForm[k]} onChange={e => setSpawnForm({ ...spawnForm, [k]: e.target.value })} placeholder={p} style={{ ...S.monoInput, minHeight: 40 }} /> : <input value={spawnForm[k]} onChange={e => setSpawnForm({ ...spawnForm, [k]: e.target.value })} placeholder={p} style={S.input} />}
+              </div>
+            ))}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+              <div><label style={{ fontSize: 9, color: 'var(--fg3)', fontWeight: 600, display: 'block', marginBottom: 3 }}>MAX ITERS</label><input type="number" value={spawnForm.iters} onChange={e => setSpawnForm({ ...spawnForm, iters: e.target.value })} style={S.input} /></div>
+              <div><label style={{ fontSize: 9, color: 'var(--fg3)', fontWeight: 600, display: 'block', marginBottom: 3 }}>TIMEOUT (S)</label><input type="number" value={spawnForm.timeout} onChange={e => setSpawnForm({ ...spawnForm, timeout: e.target.value })} style={S.input} /></div>
+            </div>
+            <div style={{ marginTop: 8 }}><label style={{ fontSize: 9, color: 'var(--fg3)', fontWeight: 600, display: 'block', marginBottom: 3 }}>TOOLS (comma-sep)</label><input value={spawnForm.tools} onChange={e => setSpawnForm({ ...spawnForm, tools: e.target.value })} placeholder="shell, http_request" style={S.input} /></div>
+            <div style={{ marginTop: 8 }}><label style={{ fontSize: 9, color: 'var(--fg3)', fontWeight: 600, display: 'block', marginBottom: 3 }}>PARENT</label><input value={spawnForm.parent} onChange={e => setSpawnForm({ ...spawnForm, parent: e.target.value })} style={S.input} /></div>
+            <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+              <button onClick={doSpawn} style={{ ...S.btn, ...S.primary, padding: '4px 10px', fontSize: 11 }}>Spawn</button>
+              <button onClick={() => setShowSpawn(false)} style={{ ...S.btn, ...S.ghost, padding: '4px 10px', fontSize: 11 }}>Cancel</button>
+            </div>
+          </div>
+        )}
+        {tree ? renderNode(tree) : <p style={{ fontSize: 12, color: 'var(--fg3)', textAlign: 'center', padding: 20 }}>Loading…</p>}
+      </div>
+      {/* Main */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
+        {detail ? (
+          <>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: 12, paddingBottom: 12, borderBottom: '1px solid var(--brd)' }}>
+              <div>
+                <h2 style={{ fontSize: 16, fontWeight: 600, color: 'var(--fg0)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div style={{ ...S.dot(detail.status), width: 9, height: 9 }} /> {detail.name} <span style={{ fontSize: 11, color: 'var(--fg3)', fontWeight: 400, fontFamily: 'var(--mono)' }}>{detail.id}</span>
+                </h2>
+                <p style={{ fontSize: 11, color: 'var(--fg2)', marginTop: 3 }}>{detail.config?.role}</p>
+                <p style={{ marginTop: 3, color: 'var(--fg0)', fontSize: 12 }}><strong>Goal:</strong> {detail.config?.goal}</p>
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {detail.id !== 'main' && <button onClick={() => terminate(detail.id)} style={{ ...S.btn, ...S.danger, padding: '4px 10px', fontSize: 11 }}>Terminate</button>}
+                <span style={S.badge(S.statusColor(detail.status))}>{detail.status}</span>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 10, margin: '12px 0' }}>
+              {[['Iterations', detail.iterations], ['Max', detail.config?.max_iterations || '∞'], ['Children', detail.children?.length || 0], ['Messages', detail.messages?.length || 0]].map(([l, v]) => (
+                <div key={l} style={S.stat}><div style={{ fontSize: 16, fontWeight: 700, color: 'var(--fg0)', fontFamily: 'var(--mono)' }}>{v}</div><div style={{ fontSize: 9, color: 'var(--fg3)', textTransform: 'uppercase', letterSpacing: '.5px', marginTop: 2 }}>{l}</div></div>
+              ))}
+            </div>
+            {detail.result && <div style={{ ...S.card, borderLeft: '3px solid var(--blue)', margin: '10px 0' }}><div style={{ fontSize: 10, color: 'var(--blue)', fontWeight: 600, marginBottom: 3 }}>RESULT</div><div style={{ fontSize: 11, color: 'var(--fg0)', whiteSpace: 'pre-wrap' }}>{detail.result}</div></div>}
+            {detail.id !== 'main' && <div style={{ display: 'flex', gap: 8, margin: '10px 0' }}><input value={agentInput} onChange={e => setAgentInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') sendMsg(); }} placeholder="Send directive…" style={{ ...S.input, flex: 1 }} /><button onClick={sendMsg} style={{ ...S.btn, ...S.primary, padding: '4px 10px', fontSize: 11 }}>Send</button></div>}
+            <h3 style={{ ...S.sectionTitle, marginTop: 12, color: 'var(--fg3)' }}>Conversation ({detail.messages?.length || 0})</h3>
+            <div style={{ maxHeight: 380, overflowY: 'auto' }}>
+              {(detail.messages || []).slice(-30).map((m, i) => (
+                <div key={i} style={{ padding: '6px 10px', borderRadius: 6, marginBottom: 3, fontSize: 11, lineHeight: 1.45, borderLeft: `3px solid ${m.role === 'user' ? 'var(--accent)' : 'var(--green)'}`, background: m.role === 'user' ? 'rgba(124,92,252,.03)' : 'rgba(46,160,67,.03)' }}>
+                  <div style={{ fontSize: 9, color: 'var(--fg3)', marginBottom: 2, fontFamily: 'var(--mono)' }}>{m.role}{m.timestamp ? ` · ${new Date(m.timestamp).toLocaleTimeString()}` : ''}</div>
+                  <div style={{ color: 'var(--fg1)', whiteSpace: 'pre-wrap', maxHeight: 120, overflowY: 'auto' }}>{(m.content || '').slice(0, 500)}</div>
+                </div>
+              ))}
+              {!detail.messages?.length && <p style={{ fontSize: 12, color: 'var(--fg3)', textAlign: 'center', padding: 12, fontStyle: 'italic' }}>No messages yet</p>}
+            </div>
+            {ipcMsgs.length > 0 && <>
+              <h3 style={{ ...S.sectionTitle, marginTop: 12, color: 'var(--pink)' }}>Inter-Agent Messages</h3>
+              <div style={{ padding: 10, background: 'var(--bg1)', border: '1px solid var(--brd)', borderRadius: 6, maxHeight: 180, overflowY: 'auto' }}>
+                {ipcMsgs.slice(-25).map((m, i) => (
+                  <div key={i} style={{ display: 'flex', alignItems: 'baseline', gap: 6, padding: '2px 0', fontSize: 10, fontFamily: 'var(--mono)', borderBottom: '1px solid rgba(39,39,58,.3)' }}>
+                    <span style={{ color: 'var(--cyan)', minWidth: 70 }}>{m.from}</span>
+                    <span style={{ color: 'var(--fg3)' }}>→</span>
+                    <span style={{ color: 'var(--pink)', minWidth: 70 }}>{m.to}</span>
+                    <span style={{ color: 'var(--amber)', minWidth: 45 }}>{m.type}</span>
+                    <span style={{ color: 'var(--fg2)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{(m.content || '').slice(0, 100)}</span>
+                  </div>
+                ))}
+              </div>
+            </>}
+          </>
+        ) : (
+          <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--fg3)' }}>
+            <div style={{ fontSize: 40, marginBottom: 12 }}>🤖</div>
+            <p style={{ fontSize: 13 }}>Select an agent from the tree to inspect</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════
+// SHELL PANEL
+// ═══════════════════════════════════════════
+function ShellPanel() {
+  const [cmd, setCmd] = useState('');
+  const [output, setOutput] = useState([{ type: 'prompt', text: 'Ready.' }]);
+  const [history, setHistory] = useState([]);
+  const outRef = useRef(null);
+
+  useEffect(() => { loadHistory(); }, []);
+  useEffect(() => { outRef.current?.scrollTo(0, outRef.current.scrollHeight); }, [output]);
+
+  const loadHistory = async () => { const d = await api('/api/shell/history'); if (d) setHistory(d.slice(0, 15)); };
+
+  const exec = async () => {
+    if (!cmd.trim()) return;
+    const c = cmd.trim(); setCmd('');
+    setOutput(prev => [...prev, { type: 'cmd', text: c }]);
+    const data = await api('/api/shell/execute', { method: 'POST', body: JSON.stringify({ command: c }) });
+    if (data) {
+      if (data.stdout) setOutput(prev => [...prev, { type: 'out', text: data.stdout }]);
+      if (data.stderr) setOutput(prev => [...prev, { type: 'err', text: data.stderr }]);
+      setOutput(prev => [...prev, { type: 'meta', text: `[exit:${data.exit_code} ${data.execution_ms}ms]` }]);
+    }
+    loadHistory();
+  };
+
+  return (
+    <div style={S.panel}>
+      <h2 style={{ fontSize: 16, fontWeight: 600, color: 'var(--fg0)', marginBottom: 12 }}>Kernel Shell</h2>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+        <input value={cmd} onChange={e => setCmd(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') exec(); }} placeholder="Enter command…" style={{ flex: 1, background: 'var(--bg1)', border: '1px solid var(--brd)', borderRadius: 6, padding: '9px 12px', color: 'var(--green)', fontFamily: 'var(--mono)', fontSize: 12, outline: 'none' }} />
+        <button onClick={exec} style={{ ...S.btn, ...S.primary }}>Execute</button>
+      </div>
+      <div ref={outRef} style={{ background: 'var(--bg1)', border: '1px solid var(--brd)', borderRadius: 8, padding: 12, fontFamily: 'var(--mono)', fontSize: 11, minHeight: 200, maxHeight: 400, overflowY: 'auto', whiteSpace: 'pre-wrap', color: 'var(--fg2)', lineHeight: 1.5 }}>
+        {output.map((o, i) => {
+          if (o.type === 'cmd') return <div key={i}><span style={{ color: 'var(--green)', fontWeight: 600 }}>$ </span>{o.text}</div>;
+          if (o.type === 'err') return <div key={i} style={{ color: 'var(--red)' }}>{o.text}</div>;
+          if (o.type === 'meta') return <div key={i} style={{ color: 'var(--fg3)' }}>{o.text}</div>;
+          return <div key={i}>{o.text}</div>;
+        })}
+      </div>
+      <h3 style={{ ...S.sectionTitle, marginTop: 16, color: 'var(--fg3)' }}>History</h3>
+      {history.map((h, i) => (
+        <div key={i} onClick={() => setCmd(h.command)} style={{ ...S.card, padding: '6px 10px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <code style={{ fontSize: 11, color: 'var(--fg0)' }}>{h.command.slice(0, 80)}</code>
+          <span style={S.badge(h.exit_code === 0 ? 'var(--green)' : 'var(--red)')}>{h.exit_code === 0 ? 'OK' : 'ERR'}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════
+// TOOLS PANEL
+// ═══════════════════════════════════════════
+function ToolsPanel() {
+  const [tools, setTools] = useState([]);
+  useEffect(() => { load(); }, []);
+  const load = async () => { const d = await api('/api/tools'); if (d) setTools(d); };
+  const del = async (id) => { await api(`/api/tools/${id}`, { method: 'DELETE' }); load(); };
+  const custom = tools.filter(t => !t.builtin), builtin = tools.filter(t => t.builtin);
+
+  return (
+    <div style={S.panel}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
+        <div><h2 style={{ fontSize: 16, fontWeight: 600, color: 'var(--fg0)' }}>Tool Registry</h2><p style={{ fontSize: 11, color: 'var(--fg3)', marginTop: 2 }}>{tools.length} total · {custom.length} custom</p></div>
+      </div>
+      {custom.length > 0 && <><h3 style={{ ...S.sectionTitle, color: 'var(--accent)' }}>Custom Tools</h3>{custom.map(t => (
+        <div key={t.id} style={S.card}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+            <strong style={{ fontSize: 12, color: 'var(--fg0)', fontFamily: 'var(--mono)' }}>{t.name}</strong>
+            <button onClick={() => del(t.id)} style={{ ...S.btn, ...S.danger, padding: '2px 8px', fontSize: 10 }}>Del</button>
+          </div>
+          <p style={{ fontSize: 10, color: 'var(--fg2)' }}>{t.description}</p>
+        </div>
+      ))}</>}
+      <h3 style={{ ...S.sectionTitle, color: 'var(--fg3)' }}>Built-in Tools</h3>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+        {builtin.map(t => <div key={t.id} style={{ ...S.card, padding: '8px 10px' }}><span style={{ fontSize: 11, fontWeight: 600, color: 'var(--fg0)', fontFamily: 'var(--mono)' }}>{t.name}</span><p style={{ fontSize: 10, color: 'var(--fg2)', marginTop: 2, lineHeight: 1.4 }}>{(t.description || '').slice(0, 100)}</p></div>)}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════
+// WORKFLOWS PANEL
+// ═══════════════════════════════════════════
+function WorkflowsPanel() {
+  const [wfs, setWfs] = useState([]);
+  useEffect(() => { load(); }, []);
+  const load = async () => { const d = await api('/api/workflows'); if (d) setWfs(d); };
+  const run = async (id) => { await api(`/api/workflows/${id}/run`, { method: 'POST' }); load(); };
+  const toggle = async (id) => { await api(`/api/workflows/${id}/toggle`, { method: 'POST' }); load(); };
+  const del = async (id) => { await api(`/api/workflows/${id}`, { method: 'DELETE' }); load(); };
+
+  return (
+    <div style={S.panel}>
+      <h2 style={{ fontSize: 16, fontWeight: 600, color: 'var(--fg0)', marginBottom: 16 }}>Workflows</h2>
+      {!wfs.length && <p style={{ fontSize: 12, color: 'var(--fg3)', textAlign: 'center', padding: 40, fontStyle: 'italic' }}>No workflows yet.</p>}
+      {wfs.map(wf => (
+        <div key={wf.id} style={{ ...S.card, padding: '12px 14px', marginBottom: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+            <strong style={{ fontSize: 13, color: 'var(--fg0)' }}>{wf.name}</strong>
+            <div style={{ display: 'flex', gap: 4 }}>
+              <button onClick={() => run(wf.id)} style={{ ...S.btn, ...S.ghost, padding: '3px 8px', fontSize: 10 }}>▶</button>
+              {wf.schedule && <button onClick={() => toggle(wf.id)} style={{ ...S.btn, ...S.ghost, padding: '3px 8px', fontSize: 10 }}>{wf.enabled ? '⏸' : '▶'}</button>}
+              <button onClick={() => del(wf.id)} style={{ ...S.btn, ...S.danger, padding: '3px 8px', fontSize: 10 }}>×</button>
+            </div>
+          </div>
+          {wf.description && <p style={{ fontSize: 10, color: 'var(--fg2)', marginBottom: 6 }}>{wf.description}</p>}
+          {wf.steps?.map((s, i) => <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 6px', background: 'var(--bg1)', borderRadius: 3, fontSize: 10, marginBottom: 2 }}><span style={{ color: 'var(--accent)', fontFamily: 'var(--mono)', fontWeight: 600 }}>{i + 1}</span><span style={{ color: 'var(--fg0)', fontFamily: 'var(--mono)' }}>{s.tool_name}</span></div>)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════
+// LOGS PANEL
+// ═══════════════════════════════════════════
+function LogsPanel() {
+  const [logs, setLogs] = useState([]);
+  const [expanded, setExpanded] = useState(null);
+  useEffect(() => { load(); }, []);
+  const load = async () => { const d = await api('/api/logs'); if (d) setLogs(d); };
+  const clear = async () => { await api('/api/logs', { method: 'DELETE' }); load(); };
+
+  const srcColor = { shell: 'var(--green)', workflow: 'var(--blue)', tool: 'var(--accent)', agent_tool: 'var(--cyan)' };
+
+  return (
+    <div style={S.panel}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
+        <h2 style={{ fontSize: 16, fontWeight: 600, color: 'var(--fg0)' }}>Execution Log</h2>
+        <button onClick={clear} style={{ ...S.btn, ...S.ghost, padding: '4px 10px', fontSize: 11 }}>Clear</button>
+      </div>
+      {!logs.length && <p style={{ fontSize: 12, color: 'var(--fg3)', textAlign: 'center', padding: 40, fontStyle: 'italic' }}>No executions yet.</p>}
+      {logs.map((e, i) => (
+        <div key={e.id || i} style={{ ...S.card, padding: '7px 10px', marginBottom: 3, cursor: 'pointer' }} onClick={() => setExpanded(expanded === i ? null : i)}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, color: 'var(--fg1)' }}>
+            <span style={S.badge(srcColor[e.source] || 'var(--fg3)')}>{e.source}</span>
+            <strong style={{ fontFamily: 'var(--mono)', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{(e.source_name || '').slice(0, 35)}</strong>
+            <span style={{ color: e.success ? 'var(--green)' : 'var(--red)' }}>{e.success ? '✓' : '✗'}</span>
+            <span style={{ color: 'var(--fg3)', marginLeft: 'auto', fontFamily: 'var(--mono)', fontSize: 9 }}>{e.execution_ms}ms</span>
+          </div>
+          {expanded === i && <pre style={{ fontSize: 9, fontFamily: 'var(--mono)', color: 'var(--fg2)', padding: 6, marginTop: 4, background: 'var(--bg1)', borderRadius: 4, maxHeight: 150, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{e.result_summary || ''}</pre>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════
+// MEMORY PANEL
+// ═══════════════════════════════════════════
+function MemoryPanel() {
+  const [facts, setFacts] = useState([]);
+  const [episodes, setEpisodes] = useState([]);
+  useEffect(() => { load(); }, []);
+  const load = async () => { const d = await api('/api/memory'); if (d) { setFacts(d.facts || []); setEpisodes(d.episodes || []); } };
+  const del = async (id) => { await api(`/api/memory/facts/${id}`, { method: 'DELETE' }); load(); };
+
+  return (
+    <div style={S.panel}>
+      <h2 style={{ fontSize: 16, fontWeight: 600, color: 'var(--fg0)', marginBottom: 16 }}>Agent Memory</h2>
+      <h3 style={{ ...S.sectionTitle, color: 'var(--accent)' }}>Learned Facts</h3>
+      {!facts.length && <p style={{ fontSize: 12, color: 'var(--fg3)', textAlign: 'center', padding: 20, fontStyle: 'italic' }}>No facts yet.</p>}
+      {facts.map(f => <div key={f.id} style={{ ...S.card, display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 10px', marginBottom: 3 }}><span style={{ fontSize: 11 }}>{f.text}</span><button onClick={() => del(f.id)} style={{ ...S.btn, ...S.danger, padding: '2px 6px', fontSize: 9 }}>×</button></div>)}
+      <h3 style={{ ...S.sectionTitle, color: 'var(--fg3)', marginTop: 20 }}>History</h3>
+      {episodes.slice(0, 25).map(e => <div key={e.id} style={{ padding: '4px 10px', background: 'var(--bg1)', borderRadius: 4, borderLeft: '2px solid var(--brd)', fontSize: 10, color: 'var(--fg2)', marginBottom: 2 }}>{e.summary}</div>)}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════
+// SETTINGS PANEL
+// ═══════════════════════════════════════════
+function SettingsPanel() {
+  const [prefs, setPrefs] = useState({ name: '', tone: 'friendly', topics: [], custom: {} });
+  const [stats, setStats] = useState(null);
+  useEffect(() => { load(); }, []);
+
+  const load = async () => {
+    const p = await api('/api/preferences'); if (p) setPrefs(p);
+    const s = await api('/api/status'); if (s) setStats(s);
+  };
+
+  const save = async (p) => { setPrefs(p); await api('/api/preferences', { method: 'PUT', body: JSON.stringify(p) }); };
+  const reset = async () => { if (confirm('Reset ALL data?')) { await api('/api/reset', { method: 'POST' }); location.reload(); } };
+
+  const tones = ['friendly', 'professional', 'casual', 'concise'];
+
+  return (
+    <div style={S.panel}>
+      <h2 style={{ fontSize: 16, fontWeight: 600, color: 'var(--fg0)', marginBottom: 20 }}>Settings</h2>
+      <div style={{ maxWidth: 480, display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div><label style={{ fontSize: 11, color: 'var(--fg2)', fontWeight: 500, display: 'block', marginBottom: 6 }}>Your Name</label>
+          <input value={prefs.name} onChange={e => save({ ...prefs, name: e.target.value })} placeholder="How should I address you?" style={{ ...S.input, padding: '9px 12px', fontSize: 13 }} /></div>
+        <div><label style={{ fontSize: 11, color: 'var(--fg2)', fontWeight: 500, display: 'block', marginBottom: 6 }}>Tone</label>
+          <div style={{ display: 'flex', gap: 6 }}>{tones.map(t => <button key={t} onClick={() => save({ ...prefs, tone: t })} style={{ ...S.btn, ...(prefs.tone === t ? S.primary : S.ghost), padding: '4px 10px', fontSize: 11, textTransform: 'capitalize' }}>{t}</button>)}</div></div>
+        <div><label style={{ fontSize: 11, color: 'var(--fg2)', fontWeight: 500, display: 'block', marginBottom: 6 }}>Interests</label>
+          <input value={(prefs.topics || []).join(', ')} onChange={e => save({ ...prefs, topics: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })} placeholder="AI, programming, music…" style={{ ...S.input, padding: '9px 12px', fontSize: 13 }} /></div>
+        {stats && <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginTop: 8 }}>
+          {[['Tools', stats.total_tools, 'var(--accent)'], ['Custom', stats.custom_tools, 'var(--green)'], ['Workflows', stats.total_workflows, 'var(--blue)'], ['Agents', stats.total_agents, 'var(--cyan)'], ['Active', stats.active_agents, 'var(--amber)'], ['Facts', stats.total_facts, 'var(--accent2)'], ['Commands', stats.total_shell_commands, 'var(--green)'], ['Logs', stats.total_logs, 'var(--fg2)']].map(([l, v, c]) => (
+            <div key={l} style={{ background: 'var(--bg2)', border: '1px solid var(--brd)', borderRadius: 6, padding: '8px 10px' }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: c, fontFamily: 'var(--mono)' }}>{v}</div>
+              <div style={{ fontSize: 9, color: 'var(--fg3)', marginTop: 1 }}>{l}</div>
+            </div>
+          ))}
+        </div>}
+        <div style={{ borderTop: '1px solid var(--brd)', paddingTop: 16, marginTop: 8 }}>
+          <button onClick={reset} style={{ ...S.btn, ...S.danger }}>Reset All Data</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════
+// APP
+// ═══════════════════════════════════════════
+function App() {
+  const [view, setView] = useState('chat');
+  const [activeAgents, setActiveAgents] = useState(0);
+
+  useEffect(() => {
+    const poll = async () => { const s = await api('/api/status'); if (s) setActiveAgents(s.active_agents || 0); };
+    poll();
+    const iv = setInterval(poll, 8000);
+    return () => clearInterval(iv);
+  }, []);
+
+  const tabs = [
+    { id: 'chat', label: 'Chat', icon: '💬' },
+    { id: 'agents', label: 'Agents', icon: '🤖' },
+    { id: 'shell', label: 'Shell', icon: '⌨' },
+    { id: 'tools', label: 'Tools', icon: '🔧' },
+    { id: 'workflows', label: 'Flows', icon: '⚡' },
+    { id: 'logs', label: 'Logs', icon: '📋' },
+    { id: 'memory', label: 'Memory', icon: '🧠' },
+    { id: 'settings', label: 'Settings', icon: '⚙' },
+  ];
+
+  const panels = { chat: ChatPanel, agents: AgentsPanel, shell: ShellPanel, tools: ToolsPanel, workflows: WorkflowsPanel, logs: LogsPanel, memory: MemoryPanel, settings: SettingsPanel };
+  const Panel = panels[view] || ChatPanel;
+
+  return (
+    <>
+      <header style={S.header}>
+        <div style={S.logo}>
+          <div style={S.logoIcon}>⚡</div>
+          <div><h1 style={{ fontSize: 13, fontWeight: 600, color: 'var(--fg0)', letterSpacing: '-.3px' }}>AgentOS</h1><small style={{ fontSize: 9, color: 'var(--fg3)', fontFamily: 'var(--mono)' }}>multi-agent orchestrator</small></div>
+        </div>
+        <nav style={S.tabs}>
+          {tabs.map(t => (
+            <button key={t.id} onClick={() => setView(t.id)} style={S.tab(view === t.id)}>
+              {t.icon} <span>{t.label}</span>
+              {t.id === 'agents' && activeAgents > 0 && <span style={{ position: 'absolute', top: -2, right: 0, background: 'var(--green)', color: '#fff', fontSize: 8, width: 14, height: 14, borderRadius: 7, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>{activeAgents}</span>}
+            </button>
+          ))}
+        </nav>
+      </header>
+      <main style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+        <Panel />
+      </main>
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
